@@ -73,6 +73,10 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           git clone --depth 1 https://github.com/osm0sis/mkbootimg
           cd mkbootimg
+          # osm0sis/mkbootimg builds with -Werror; new gcc turns its
+          # warnings into errors, so drop -Werror. Use host cc (x86_64).
+          sed -i 's/-Werror//g' Makefile libmincrypt/Makefile
+          make
           ./mkbootimg --kernel "$GITHUB_WORKSPACE/deploy/linux/build/Image.gz-dtb" \
             --ramdisk "$GITHUB_WORKSPACE/deploy/linux/build/r11t-arch-initramfs.cpio.gz" \
             --pagesize 4096 --base 0x80000000 \
