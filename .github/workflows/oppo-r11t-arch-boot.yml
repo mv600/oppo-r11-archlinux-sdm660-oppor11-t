@@ -47,10 +47,23 @@ jobs:
       - name: Build kernel Image.gz + dtb
         run: |
           cd "$GITHUB_WORKSPACE/deploy/linux"
-          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- sdm660_defconfig
-          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
-          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= sdm660_defconfig
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= olddefconfig
+          # Keep the release identical to modules-r11t-gcc (vermagic must match).
+          ./scripts/config --file build/.config \
+            --set-str LOCALVERSION -sdm660-gcc+ --disable LOCALVERSION_AUTO
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= olddefconfig
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LOCALVERSION= \
             -j"$(nproc)" Image.gz qcom/sdm660-oppo-r11t.dtb
+      - name: Verify kernel release (sdm660-gcc+)
+        run: |
+          REL=$(cat build/include/config/kernel.release)
+          VER=$(make -s O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernelversion)
+          if [ "$REL" != "$VER-sdm660-gcc+" ]; then
+            echo "kernel release mismatch: got $REL want $VER-sdm660-gcc+" >&2
+            exit 1
+          fi
+          echo "kernel release: $REL"
       - name: Build boot initramfs (busybox + init.arch)
         run: |
           cd "$GITHUB_WORKSPACE"
