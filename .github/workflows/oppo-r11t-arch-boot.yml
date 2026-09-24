@@ -39,7 +39,10 @@ jobs:
           tar xf busybox.tar.bz2 && cd busybox-1.36.1
           make defconfig
           sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
-          make oldconfig >/dev/null 2>&1
+          # tc is broken with new kernel UAPI headers (TCA_CBQ_* removed);
+          # not needed in the initramfs.
+          sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config
+          make oldconfig </dev/null >/dev/null 2>&1
           make -j"$(nproc)" CROSS_COMPILE=aarch64-linux-gnu-
       - name: Build kernel Image.gz + dtb
         run: |
