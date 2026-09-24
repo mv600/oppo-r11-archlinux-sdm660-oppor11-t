@@ -1,0 +1,92 @@
+name: OPPO R11T arch boot image
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ['**']
+    paths:
+      - 'archlinux/**'
+      - 'initramfs/init.arch'
+      - 'scripts/build-arch-boot-image.sh'
+      - '.github/workflows/oppo-r11t-arch-boot.yml'
+
+jobs:
+  build-boot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout deployment (self)
+        uses: actions/checkout@v4
+        with:
+          path: deploy
+      - name: Checkout kernel fork (battery+VOOC+NFC fixes)
+        uses: actions/checkout@v4
+        with:
+          repository: mv600/linux-sdm660-oppor11-t
+          ref: qcom-sdm660-7.0.y
+          path: deploy/linux
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex cpio rsync xz-utils bzip2 \
+            device-tree-compiler gcc-aarch64-linux-gnu \
+            libssl-dev libelf-dev python3-pip
+      - name: Build static aarch64 busybox
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          curl -fsSL -o busybox.tar.bz2 https://busybox.net/downloads/busybox-1.36.1.tar.bz2
+          tar xf busybox.tar.bz2 && cd busybox-1.36.1
+          make defconfig
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          make oldconfig >/dev/null 2>&1
+          make -j"$(nproc)" CROSS_COMPILE=aarch64-linux-gnu-
+      - name: Build kernel Image.gz + dtb
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- sdm660_defconfig
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- olddefconfig
+          make O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            -j"$(nproc)" Image.gz qcom/sdm660-oppo-r11t.dtb
+      - name: Build boot initramfs (busybox + init.arch)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          IR=$GITHUB_WORKSPACE/initramfs-root
+          mkdir -p "$IR"/{bin,dev,proc,sys,newroot}
+          cp busybox-1.36.1/busybox "$IR/bin/busybox"
+          aarch64-linux-gnu-strip "$IR/bin/busybox"
+          cp deploy/initramfs/init.arch "$IR/init"
+          chmod 0755 "$IR/init"
+          ( cd "$IR" && find . -print0 | cpio --null -ov --format=newc ) | \
+            gzip -9 > deploy/linux/build/r11t-arch-initramfs.cpio.gz
+      - name: Pack Image.gz-dtb
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux/build"
+          cp arch/arm64/boot/Image.gz Image.gz-dtb
+          dd if=arch/arm64/boot/dts/qcom/sdm660-oppo-r11t.dtb \
+            of=Image.gz-dtb oflag=append conv=notrunc status=none
+      - name: mkbootimg
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          git clone --depth 1 https://github.com/osm0sis/mkbootimg
+          cd mkbootimg
+          ./mkbootimg --kernel "$GITHUB_WORKSPACE/deploy/linux/build/Image.gz-dtb" \
+            --ramdisk "$GITHUB_WORKSPACE/deploy/linux/build/r11t-arch-initramfs.cpio.gz" \
+            --pagesize 4096 --base 0x80000000 \
+            --kernel_offset 0x00008000 --ramdisk_offset 0x03000000 \
+            --second_offset 0x00f00000 --tags_offset 0x00000100 \
+            --header_version 1 --os_version 9.0.0 --os_patch_level 2019-09 \
+            --cmdline 'console=tty0 console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=7 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init' \
+            -o boot-r11t-arch.img
+      - name: Verify boot header + size
+        run: |
+          [ "$(dd if=boot-r11t-arch.img bs=8 count=1 status=none)" = 'ANDROID!' ]
+          size=$(stat -c%s boot-r11t-arch.img)
+          [ "$size" -le 67108864 ]
+          echo "boot-r11t-arch.img: $size bytes"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: boot-r11t-arch
+          if-no-files-found: error
+          path: boot-r11t-arch.img
