@@ -1,0 +1,30 @@
+#!/bin/bash
+# OPPO R11T: fix ath10k random MAC by reading stock NV partition.
+# Source: oppodycnvbk = /dev/block/mmcblk0p1 (GPT slot fixed), offset 0xBCEFC,
+# 6 bytes little-endian order; value is device-specific (verified stable across reboots).
+# Usage: run at boot (or udev) before/after wlan0 appears; idempotent.
+
+DEV=/dev/block/mmcblk0p1
+OFF=0xBCEFC
+IFACE=${WLAN_IFACE:-wlan0}
+
+mac=$(dd if="$DEV" bs=1 skip=$((OFF)) count=6 2>/dev/null | od -An -tx1 | tr -d ' \n')
+[ ${#mac} -eq 12 ] || { echo "fix-wlan-mac: read failed ($DEV)" >&2; exit 1; }
+
+# bytes are stored reversed on disk; reverse below to get the real address.
+mac="${mac:10:2}:${mac:8:2}:${mac:6:2}:${mac:4:2}:${mac:2:2}:${mac:0:2}"
+mac=$(echo "$mac" | tr '[:lower:]' '[:upper:]')
+
+# guard: must be a unicast, non-zero, non-random MAC
+b1=$((16#${mac%%:*}))
+[ $((b1 & 1)) -eq 0 ] && [ "$mac" != "00:00:00:00:00:00" ] || { echo "fix-wlan-mac: invalid MAC $mac" >&2; exit 1; }
+
+# wait for the interface, then apply (idempotent)
+for i in $(seq 1 30); do
+  [ -d "/sys/class/net/$IFACE" ] && break
+  sleep 1
+done
+[ -d "/sys/class/net/$IFACE" ] || { echo "fix-wlan-mac: $IFACE not present" >&2; exit 1; }
+
+ip link set dev "$IFACE" address "$mac"
+echo "fix-wlan-mac: $IFACE -> $mac"
