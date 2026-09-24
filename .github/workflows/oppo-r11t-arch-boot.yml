@@ -57,6 +57,7 @@ jobs:
             -j"$(nproc)" Image.gz qcom/sdm660-oppo-r11t.dtb
       - name: Verify kernel release (sdm660-gcc+)
         run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
           REL=$(cat build/include/config/kernel.release)
           VER=$(make -s O=build ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- kernelversion)
           if [ "$REL" != "$VER-sdm660-gcc+" ]; then
