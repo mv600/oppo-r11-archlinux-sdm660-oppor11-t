@@ -8,7 +8,7 @@ for module in \
 	rmi_core rmi_i2c bq27xxx_battery bq27xxx_battery_i2c qcom-spmi-rradc \
 	qcom-spmi-vadc qcom-spmi-adc5 qcom_smbx oppo_vooc \
 	led-class-flash led-class-multicolor leds-qcom-lpg \
-	ledtrig-pattern leds-qcom-flash nxp-nci nxp-nci_i2c; do
+	ledtrig-pattern leds-qcom-flash; do
 	modprobe "$module"
 done
 

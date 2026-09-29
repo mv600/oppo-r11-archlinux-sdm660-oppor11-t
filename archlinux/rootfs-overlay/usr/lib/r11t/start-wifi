@@ -1,5 +1,185 @@
-#!/bin/sh
+#!/bin/bash
+# R11T WiFi bring-up: start the MSS remoteproc, then provision the factory
+# WLAN MAC into ath10k_snoc via the WLFW QMI path.
+#
+# Why the MAC read is not a "dd 6 bytes at a fixed offset":
+#
+#   The factory address lives in oppodycnvbk (= /dev/block/mmcblk0p1), a
+#   QPST/QSC-managed *dynamic* NV image.  It is a sequence of records:
+#
+#       TT(1)=01 | ID(2, big endian) | VER(1) | DATA
+#
+#   Address records are ID=0x0600, VER=0x05, and carry a 12-byte payload:
+#
+#       u32 index | MAC[6] (reversed on disk) | u16 pad (0xffff)
+#
+#   So a complete record is 16 bytes:
+#
+#       01 06 00 05 | 46 12 00 00 | <6 MAC bytes, reversed> | ff ff
+#       \___ tag __/ \__ index _/ \___ MAC (reversed) ____/ \_ pad _/
+#
+#   This unit has *two* address records whose last bytes differ by one, the
+#   usual WiFi / Bluetooth pairing.  Which one is which was settled by reading
+#   the live interface under stock Android (see evidence/stock-wlan.txt in the
+#   project handoff; the values themselves are deliberately not in this file):
+#
+#       index 0x1246, record at 0xBCEF4  ->  WiFi (wlan0)
+#       index 0x01bf, record at 0xBCC84  ->  Bluetooth BDADDR
+#
+#   The record *index* is the only MAC-independent way to tell them apart, so
+#   nothing here searches for the MAC itself: we locate the 4-byte tag
+#   01 06 00 05 and then compare the index against 0x1246.  That keeps working
+#   if the NV service ever rewrites the MAC field, and it survives the record
+#   moving to a different offset.
+#
+#   oppostanvbk (= mmcblk0p2) is a *blank factory template*: all 26 of its
+#   address slots are empty.  Never read the MAC from p2.
+#
+#   The persist partition holds a third copy in plainer TLV form
+#   (01 00 06 | <6 bytes>), but on this unit that copy is the *Bluetooth*
+#   address, so it is not what we want here.
+#
+# Sibling records in the same 01 xx xx 05 family, for reference: 0x0800 and
+# 0x9500 are RF calibration blocks, and 04 7c 00 05 is a string record
+# (serial, 24 ASCII bytes).
+#
+# Verify on the phone (no guessing):
+#   cat /sys/module/ath10k_snoc/parameters/mac_addr   <- what we asked for
+#   journalctl -b | grep "provisioned MAC"             <- kernel ack, qmi.c:702
+#   ip -br addr show wlan0                             <- what we got
 set -eu
+
+NV_DEV=${R11T_NV_DEV:-/dev/block/mmcblk0p1}
+NV_SCAN_MIB=${R11T_NV_SCAN_MIB:-32}
+NV_SNAPSHOT=${R11T_NV_SNAPSHOT:-/var/lib/r11t/wlan-mac}
+
+# MAC-independent selector for the WiFi address record.
+NV_WIFI_PREFIX_HEX=${R11T_NV_WIFI_PREFIX:-0106000546120000}
+# Fallback: absolute offset of the same record, empirically stable across
+# reboots (evidence/stock-wlan.txt, two boots, same partition sha256).
+NV_WIFI_ABS_OFFSET=${R11T_NV_WIFI_ABS_OFFSET:-773876}   # 0xBCEF4
+
+log()  { printf 'start-wifi: %s\n' "$*" >&2; }
+fail() { printf 'start-wifi: ERROR: %s\n' "$*" >&2; exit 1; }
+
+########################################################################
+# NV record scanning
+########################################################################
+
+# Tag that introduces an address record, as a PCRE so it can carry the NUL
+# bytes a shell argument or a -f pattern file cannot.
+NV_ADDR_TAG_RE='\x01\x06\x00\x05'
+# Bytes a complete address record occupies: tag(4) index(4) mac(6) pad(2).
+NV_ADDR_REC_LEN=16
+NV_ADDR_TAG_HEX=01060005
+
+# A candidate MAC is only believable if it is a globally unique unicast
+# address: bit 0 of the first octet (multicast) and bit 1 (locally
+# administered) must both be clear.  That alone rejects the 02:xx:.. addresses
+# the kernel invents when nothing was provisioned.
+mac_is_plausible() {
+	local m=$1 first
+	[ ${#m} -eq 17 ] || return 1
+	case $m in ??:??:??:??:??:??) ;; *) return 1 ;; esac
+	first=${m%%:*}
+	[ $(( 0x$first & 0x03 )) -eq 0 ] || return 1
+	case $m in 00:00:00:00:00:00|ff:ff:ff:ff:ff:ff) return 1 ;; esac
+	return 0
+}
+
+# mac_from_reversed <12 hex chars> -> the real address (the bytes are stored
+# reversed on disk).
+mac_from_reversed() {
+	local m=$1
+	[ ${#m} -eq 12 ] || return 1
+	printf '%s:%s:%s:%s:%s:%s\n' \
+		"${m:10:2}" "${m:8:2}" "${m:6:2}" "${m:4:2}" "${m:2:2}" "${m:0:2}"
+}
+
+# record_at <dev> <byte offset> -> "index mac pad" hex if a complete address
+# record starts exactly there.
+record_at() {
+	local hex
+	# iflag=skip_bytes/count_bytes turns this into one lseek plus one 16-byte
+	# read; plain "bs=1 skip=773876" would be 773876 single-byte reads.
+	hex=$(dd if="$1" bs=1M skip="$2" count=$NV_ADDR_REC_LEN \
+	    iflag=skip_bytes,count_bytes 2>/dev/null \
+	    | od -An -v -tx1 | tr -d ' \n') || return 1
+	[ ${#hex} -eq $(( NV_ADDR_REC_LEN * 2 )) ] || return 1
+	[ "${hex:0:8}" = "$NV_ADDR_TAG_HEX" ] || return 1
+	printf '%s %s %s\n' "${hex:8:8}" "${hex:16:12}" "${hex:28:4}"
+}
+
+# find_address_records <dev> [window bytes] -> one byte offset per line, for
+# every address record in the window.  GNU grep does the binary search; doing
+# it in shell string arithmetic is O(n^2) and unusable on a megabyte of hex.
+find_address_records() {
+	local dev=$1 mib=$(( ${2:-0} / 1048576 ))
+	[ "$mib" -ge 1 ] || mib=$NV_SCAN_MIB
+	dd if="$dev" bs=1048576 count="$mib" 2>/dev/null \
+		| grep -aobP "$NV_ADDR_TAG_RE" 2>/dev/null | cut -d: -f1
+}
+
+# read_nv_wlan_mac <dev> -> prints the WiFi MAC, or nothing.
+#
+# Two tiers, cheapest first:
+#   1. the 16-byte record at its known absolute offset -- one small read, and
+#      this offset was stable across reboots with an unchanged partition
+#      sha256 (evidence/stock-wlan.txt, two boots);
+#   2. enumerate every address record and pick the one whose *index* selects
+#      the WiFi slot.  The index does not depend on the MAC, so this survives
+#      an NV rewrite that moves the record or changes the address.
+# If both miss, the caller falls back to the snapshot file.
+read_nv_wlan_mac() {
+	local dev=$1 want_idx=${NV_WIFI_PREFIX_HEX:8:8}
+	local off idx mac pad cand
+
+	[ -r "$dev" ] || { log "NV partition $dev is not readable"; return 1; }
+
+	# Tier 1: absolute offset.  The position alone is the selector here, so a
+	# renumbered record is still accepted; say so, because it means the index
+	# in NV_WIFI_PREFIX_HEX no longer describes this device.
+	if read -r idx mac pad < <(record_at "$dev" "$NV_WIFI_ABS_OFFSET"); then
+		cand=$(mac_from_reversed "$mac" || true)
+		if [ -n "$cand" ] && mac_is_plausible "$cand"; then
+			[ "$idx" = "$want_idx" ] || log "record at 0x$(printf %x "$NV_WIFI_ABS_OFFSET") has index $idx, not $want_idx; trusting the position"
+			printf '%s\n' "$cand"
+			return 0
+		fi
+	fi
+
+	# Tier 2: index-selected scan.
+	while read -r off; do
+		[ -n "$off" ] || continue
+		read -r idx mac pad < <(record_at "$dev" "$off") || continue
+		[ "$idx" = "$want_idx" ] || continue
+		cand=$(mac_from_reversed "$mac" || true)
+		[ -n "$cand" ] && mac_is_plausible "$cand" || continue
+		[ "$off" = "$NV_WIFI_ABS_OFFSET" ] || log "address record moved: expected 0x$(printf %x "$NV_WIFI_ABS_OFFSET"), found 0x$(printf %x "$off")"
+		printf '%s\n' "$cand"
+		return 0
+	done < <(find_address_records "$dev")
+
+	return 1
+}
+
+snapshot_save() {
+	local mac=$1
+	mkdir -p "${NV_SNAPSHOT%/*}" 2>/dev/null || return 0
+	( umask 022; printf '%s\n' "$mac" > "$NV_SNAPSHOT" ) || return 0
+}
+
+snapshot_load() {
+	local m=
+	[ -r "$NV_SNAPSHOT" ] || return 1
+	read -r m < "$NV_SNAPSHOT" || return 1
+	mac_is_plausible "$m" || return 1
+	printf '%s\n' "$m"
+}
+
+########################################################################
+# MSS remoteproc
+########################################################################
 
 modprobe ath10k_core
 
@@ -14,40 +194,56 @@ for retry in $(seq 1 100); do
 	[ -n "$mss" ] && break
 	sleep 0.1
 done
-[ -n "$mss" ] || { echo 'MSS remoteproc did not register' >&2; exit 1; }
+[ -n "$mss" ] || fail 'MSS remoteproc did not register'
 
 state=$(cat "$mss/state")
 [ "$state" != offline ] || echo start > "$mss/state"
 
-# OPPO R11T stock NV partition (oppodycnvbk = GPT slot p1, fixed) holds the
-# factory WLAN MAC at offset 0xBCEFC, 6 bytes stored in reversed order.
-read_nv_mac() {
-	dev=/dev/block/mmcblk0p1
-	[ -r "$dev" ] || return 1
-	mac=$(dd if="$dev" bs=1 skip=$((0xBCEFC)) count=6 2>/dev/null | od -An -tx1 | tr -d ' \n')
-	[ ${#mac} -eq 12 ] || return 1
-	# bytes on disk are in reversed order -> un-reverse below
-	mac="${mac:10:2}:${mac:8:2}:${mac:6:2}:${mac:4:2}:${mac:2:2}:${mac:0:2}"
-	echo "$mac" | tr '[:lower:]' '[:upper:]'
-}
+########################################################################
+# MAC provisioning
+########################################################################
 
-# Pass the factory MAC to ath10k_snoc at modprobe time: the wcn3990 QMI
-# handshake (qmi.c mac_pton) consumes the module parameter during probe,
-# so writing it after wlan0 exists is too late.
-mac=$(read_nv_mac || true)
+mac=$(read_nv_wlan_mac || true)
+mac_src=nv
+if [ -z "$mac" ]; then
+	mac=$(snapshot_load || true)
+	mac_src=snapshot
+	log 'address record not found in NV; falling back to the snapshot file'
+fi
 if [ -n "$mac" ]; then
+	[ "$mac_src" = nv ] && snapshot_save "$mac"
+	log "provisioning WLAN MAC $mac (source: $mac_src)"
+	# modprobe against an already-loaded module is a silent no-op that still
+	# returns success, so verify the parameter actually landed afterwards.
 	modprobe ath10k_snoc mac_addr="$mac"
 else
-	echo 'WLAN MAC read from NV partition failed; loading with random MAC' >&2
+	log 'WLAN MAC could not be determined; loading with the firmware default'
+	log "address record offsets seen (start a record, 16 bytes each):"
+	find_address_records "$NV_DEV" 2>/dev/null | sed 's/^/  /' >&2 || :
 	modprobe ath10k_snoc
 fi
 
+wanted=${mac:-}
 for retry in $(seq 1 300); do
-	if [ -r /sys/class/net/wlan0/address ] && { [ -z "$mac" ] || \
-	   [ "$(cat /sys/class/net/wlan0/address)" = "$mac" ]; }; then
-		exit 0
+	if [ -r /sys/class/net/wlan0/address ]; then
+		got=$(cat /sys/class/net/wlan0/address)
+		if [ -z "$wanted" ]; then
+			log "wlan0 registered with firmware default MAC $got"
+			exit 0
+		fi
+		if [ "$got" = "$wanted" ]; then
+			exit 0
+		fi
+		failed=$got
 	fi
 	sleep 0.1
 done
-echo 'wlan0 did not register with the factory MAC' >&2
-exit 1
+
+if [ -n "$wanted" ]; then
+	fail "wlan0 came up as ${failed:-<none>} instead of $wanted --
+the ath10k_snoc mac_addr parameter did not take effect.  Either the module
+was already loaded before this unit ran (modprobe is then a no-op), or the
+WLFW QMI request was rejected -- check 'journalctl -b | grep -i
+\"provisioned MAC\\|MAC address request rejected\"'."
+fi
+fail 'wlan0 did not register'
