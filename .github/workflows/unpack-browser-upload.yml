@@ -1,0 +1,101 @@
+# 部署层专用：把手机网页上传的 browser-upload*.zip 解压进仓库并提交。
+#
+# 触发链：网页上传 zip = 一次 push -> 本工作流解压并提交 -> 那次 push 又触发
+# oppo-r11t-arch-boot.yml。zip 已被删除，所以第二次进本工作流时空手而归，不会自激。
+#
+# 与内核仓库那份的差别：
+#   * 匹配 browser-upload*.zip（部署层的包叫 browser-upload-wlan-mac.zip，
+#     内核那份硬编码 browser-upload.zip）
+#   * commit message 不再硬编码 "bq27541 battery fix"
+#   * 两道守卫，见下。本仓库的 .gitignore 是白名单式的，这两道不是摆设
+#
+# ⚠ 这个文件必须你在网页上手建（仓库 -> Add file -> 新建文件），不能用 GITHUB_TOKEN：
+#   本仓库 .gitignore 第一行是 `*`，`.github/` 没被放行，git 层面根本提交不进去。
+name: unpack browser-upload
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  unpack:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 找出上传的 zip
+        id: find
+        run: |
+          shopt -s nullglob
+          zips=(browser-upload*.zip)
+          if [ ${#zips[@]} -eq 0 ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "这次 push 里没有 browser-upload*.zip，无需处理"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "${zips[@]}" | tee zips.txt
+          fi
+
+      - name: 解压
+        if: steps.find.outputs.found == 'true'
+        run: |
+          : > packed.txt
+          while read -r z; do
+            echo "::group::unzip $z"
+            unzip -o "$z"
+            echo "::endgroup::"
+            # 记下包里带了哪些文件，留给后面的守卫核对
+            unzip -Z1 "$z" | grep -v '/$' | sed 's#^\./##' >> packed.txt
+            # 这个 zip 是未跟踪且被 .gitignore 忽略的，`git rm -f` 对它是空操作、
+            # 文件会留在工作区，所以显式删；--cached 那步是为了万一将来它被跟踪了。
+            rm -f "$z"
+            git rm -q --cached --ignore-unmatch "$z" 2>/dev/null || true
+          done < zips.txt
+          rm -f zips.txt
+          git add -A
+          echo "包内文件清单："
+          cat packed.txt
+
+      - name: 守卫 1：workflow 文件不许走这条路
+        if: steps.find.outputs.found == 'true'
+        run: |
+          if [ -d .github/workflows ] && [ -n "$(ls -A .github/workflows 2>/dev/null)" ]; then
+            echo "::error::上传包里有 .github/workflows/ 下的文件。本仓库 .gitignore 第一行是 \`*\` 且没有放行 .github/，它们不会进索引、不会生效。请到仓库网页上直接新建/编辑 workflow 文件。"
+            ls -l .github/workflows
+            exit 1
+          fi
+
+      - name: 守卫 2：确认包里的文件都真的会进索引
+        if: steps.find.outputs.found == 'true'
+        run: |
+          dropped=0
+          while read -r f; do
+            [ -n "$f" ] || continue
+            if git diff --cached --name-only | grep -qxF "$f"; then continue; fi
+            if git ls-files --error-unmatch -- "$f" >/dev/null 2>&1; then
+              echo "::warning::$f 在包里，但内容与仓库里完全相同，没有产生改动"
+              continue
+            fi
+            echo "::error::$f 不会进索引，多半是被 .gitignore 的白名单挡住了。本仓库只放行 .gitignore / README.md / OPPO_R11T_WIFI_MAINLINE_BRINGUP.md / initramfs/ / scripts/ / archlinux/。"
+            dropped=1
+          done < packed.txt
+          if [ "$dropped" -ne 0 ]; then
+            echo "::error::上面这些文件不会生效。请把路径加进 .gitignore 的放行列表，或换个路径。"
+            exit 1
+          fi
+
+      - name: 提交并推送
+        if: steps.find.outputs.found == 'true'
+        run: |
+          if git diff --cached --quiet; then
+            echo "解压后没有产生任何改动，无需提交"
+            exit 0
+          fi
+          files=$(git diff --cached --name-only | head -20 | tr '\n' ' ')
+          git config user.name "browser-upload"
+          git config user.email "browser-upload@local"
+          git commit -q -m "deployment: apply browser upload ($files)"
+          git push
+          echo "::notice::这次 push 会触发 oppo-r11t-arch-boot.yml"
