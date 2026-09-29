@@ -61,9 +61,13 @@ jobs:
       - name: 守卫 1：workflow 文件不许走这条路
         if: steps.find.outputs.found == 'true'
         run: |
-          if [ -d .github/workflows ] && [ -n "$(ls -A .github/workflows 2>/dev/null)" ]; then
+          # 只看**包里带了什么**（packed.txt），不看磁盘上有什么。
+          # 本仓库的 workflow 是用网页上传建的，已经在 git 里，actions/checkout
+          # 之后 .github/workflows/ 必然非空 —— 查磁盘的话这道守卫每次都误报，
+          # 2026-09-29 第一次真机上传就是这么被挡住的。
+          if grep -q '^\.github/workflows/' packed.txt; then
             echo "::error::上传包里有 .github/workflows/ 下的文件。本仓库 .gitignore 第一行是 \`*\` 且没有放行 .github/，它们不会进索引、不会生效。请到仓库网页上直接新建/编辑 workflow 文件。"
-            ls -l .github/workflows
+            grep '^\.github/workflows/' packed.txt
             exit 1
           fi
 
