@@ -1,5 +1,32 @@
 #!/bin/sh
-set -eu
+# R11T local hardware bring-up: display, touch, battery, LEDs, and the CPU
+# clock driver.
+#
+# Why this script does NOT use "set -e"
+#
+#   The list mixes subsystems that have nothing to do with each other.  A
+#   charging driver (oppo_vooc, qcom_smbx) sits between the DRM modules and
+#   the LED modules, so one charging-driver failure used to abort the whole
+#   script *before* the DRM wait loop at the bottom: msm.ko was loaded but
+#   nothing ever waited for /dev/dri/card0, and r11t-local-hardware.service
+#   failed even though the display was perfectly fine.  A driver that cannot
+#   load must not be able to take the display down with it.
+#
+#   So: load everything, record what did not load, report it once, and let the
+#   one thing that actually matters decide the exit status -- the DRM nodes.
+#
+#   The ordering is still deliberate (firmware/DRM dependencies first, charging
+#   drivers last); it just no longer matters if something in between fails.
+set -u
+
+log() { printf 'start-local-hardware: %s\n' "$*" >&2; }
+
+# Module names use '-' or '_' interchangeably; sysfs always uses '_'.
+is_loaded() {
+	[ -d "/sys/module/$(printf '%s' "$1" | tr - _)" ]
+}
+
+failed=''
 
 for module in \
 	mdt_loader ocmem ubwc_config llcc-qcom qcom_aoss \
@@ -7,14 +34,29 @@ for module in \
 	drm_display_helper drm_dp_aux_bus panel-samsung-s6e3fa3 msm \
 	rmi_core rmi_i2c bq27xxx_battery bq27xxx_battery_i2c qcom-spmi-rradc \
 	qcom-spmi-vadc qcom-spmi-adc5 qcom_smbx oppo_vooc \
+	qcom_r11t_osm_cpufreq \
 	led-class-flash led-class-multicolor leds-qcom-lpg \
 	ledtrig-pattern leds-qcom-flash; do
-	modprobe "$module"
+	# modprobe exits non-zero if the module is already loaded *with different
+	# parameters*, so re-check sysfs before calling it a failure.
+	if modprobe "$module" 2>/dev/null || is_loaded "$module"; then
+		:
+	else
+		failed="$failed $module"
+	fi
 done
 
+[ -n "$failed" ] || log '全部驱动加载成功'
+
+# The only hard requirement: the DRM nodes.  Everything else is best effort.
 for retry in $(seq 1 200); do
-	[ -e /dev/dri/card0 ] && [ -e /dev/dri/renderD128 ] && exit 0
+	if [ -e /dev/dri/card0 ] && [ -e /dev/dri/renderD128 ]; then
+		[ -z "$failed" ] || log "这些驱动没加载上（不影响显示）：$failed"
+		exit 0
+	fi
 	sleep 0.1
 done
-echo 'DRM device did not register' >&2
+
+log 'DRM device did not register'
+[ -n "$failed" ] && log "这些驱动同时也没加载上：$failed"
 exit 1
