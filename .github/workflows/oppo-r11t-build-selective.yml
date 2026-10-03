@@ -1,0 +1,258 @@
+mkdir -p upload/oppo-r11-archlinux-sdm660-oppor11-t/.github/workflows
+cat > upload/oppo-r11-archlinux-sdm660-oppor11-t/.github/workflows/oppo-r11t-build-selective.yml << 'YML'
+name: oppo-r11t - selective build (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_boot:
+        description: "Build arch-boot.img (boot)"
+        type: boolean
+        default: false
+      build_modules:
+        description: "Build modules-r11t-gcc.zip"
+        type: boolean
+        default: true
+      modules_scope:
+        description: "Modules build scope"
+        type: choice
+        required: true
+        default: all
+        options:
+          - all
+          - cpufreq
+          - drivers/cpufreq
+          - sound/soc/codecs
+          - custom
+      modules_custom_m:
+        description: "Custom M= (only when scope=custom, e.g. drivers/cpufreq)"
+        type: string
+        default: ""
+      kernel_defconfig:
+        description: "Kernel defconfig"
+        type: string
+        default: "sdm660_defconfig"
+      make_jobs:
+        description: "Parallel jobs (-j)"
+        type: string
+        default: ""
+      skip_strip:
+        description: "Skip strip_modules (debug friendly)"
+        type: boolean
+        default: false
+
+env:
+  KERNEL_REPO: https://github.com/mv600/linux-sdm660-oppor11-t
+  KERNEL_BRANCH: qcom-sdm660-7.0.y
+
+jobs:
+  quick-check-cpufreq:
+    name: Quick check - drivers/cpufreq (syntax)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ inputs.build_modules == true && (inputs.modules_scope == 'cpufreq' || inputs.modules_scope == 'drivers/cpufreq') }}
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev libssl-dev \
+            python3 python3-pip lz4 zstd cpio wget rsync kmod \
+            crossbuild-essential-arm64 gcc-12-aarch64-linux-gnu g++-12-aarch64-linux-gnu
+
+      - name: Checkout kernel
+        run: |
+          git clone --depth=1 --branch $KERNEL_BRANCH $KERNEL_REPO kernel
+
+      - name: Apply kernel patches (from this repo)
+        run: |
+          set -e
+          if [ -d "kernel_patches" ]; then
+            for p in kernel_patches/*.patch; do
+              [ -f "$p" ] || continue
+              echo "Applying $p"
+              patch -p1 -d kernel < "$p"
+            done
+          fi
+          if [ -d "kernel_configs" ]; then
+            cp -v kernel_configs/* kernel/ 2>/dev/null || true
+          fi
+
+      - name: Prep defconfig
+        run: |
+          cd kernel
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../out ${{ inputs.kernel_defconfig }} -j$(nproc)
+
+      - name: Compile cpufreq object only (fast syntax check)
+        run: |
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          make -j"$J" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- LD=ld.bfd O=out \
+            drivers/cpufreq/qcom_r11t_osm_cpufreq.o
+          echo "OK: cpufreq .o compiled"
+
+  build-modules:
+    name: Build modules
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    needs: [quick-check-cpufreq]
+    if: ${{ always() && inputs.build_modules == true && needs.quick-check-cpufreq.result != 'failure' }}
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev libssl-dev \
+            python3 python3-pip lz4 zstd cpio wget rsync kmod \
+            crossbuild-essential-arm64 gcc-12-aarch64-linux-gnu g++-12-aarch64-linux-gnu \
+            dwarves
+
+      - name: Checkout kernel
+        run: |
+          git clone --depth=1 --branch $KERNEL_BRANCH $KERNEL_REPO kernel
+
+      - name: Apply kernel patches
+        run: |
+          set -e
+          if [ -d "kernel_patches" ]; then
+            for p in kernel_patches/*.patch; do
+              [ -f "$p" ] || continue
+              echo "Applying $p"
+              patch -p1 -d kernel < "$p"
+            done
+          fi
+          if [ -d "kernel_configs" ]; then
+            cp -v kernel_configs/* kernel/ 2>/dev/null || true
+          fi
+
+      - name: Prep defconfig
+        run: |
+          cd kernel
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../out ${{ inputs.kernel_defconfig }} -j$(nproc)
+
+      - name: Build modules (selective)
+        run: |
+          set -e
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          SCOPE="${{ inputs.modules_scope }}"
+          case "$SCOPE" in
+            all)
+              make -j"$J" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out modules
+              ;;
+            cpufreq|drivers/cpufreq)
+              make -j"$J" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out modules M=drivers/cpufreq
+              ;;
+            sound/soc/codecs)
+              make -j"$J" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out modules M=sound/soc/codecs
+              ;;
+            custom)
+              CUSTOM="${{ inputs.modules_custom_m }}"
+              if [ -z "$CUSTOM" ]; then
+                echo "modules_custom_m empty for scope=custom"
+                exit 1
+              fi
+              make -j"$J" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out modules M="$CUSTOM"
+              ;;
+          esac
+
+      - name: Install modules
+        run: |
+          rm -rf mod_install
+          make -j1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out INSTALL_MOD_PATH=mod_install modules_install
+
+      - name: Strip modules (optional)
+        if: ${{ inputs.skip_strip != true }}
+        run: |
+          find mod_install -name '*.ko' -exec aarch64-linux-gnu-strip --strip-unneeded {} + 2>/dev/null || true
+
+      - name: Package modules-r11t-gcc.zip
+        run: |
+          mkdir -p package
+          rsync -a mod_install/lib/modules/ package/
+          (cd package && zip -qr9 ../modules-r11t-gcc.zip .)
+
+      - name: Upload modules artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: modules-r11t-gcc-${{ github.run_number }}
+          path: modules-r11t-gcc.zip
+          retention-days: 14
+
+  build-boot:
+    name: Build boot (arch-boot.img)
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    if: ${{ inputs.build_boot == true }}
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential flex bison bc libelf-dev libssl-dev \
+            python3 python3-pip lz4 zstd cpio wget rsync kmod \
+            crossbuild-essential-arm64 gcc-12-aarch64-linux-gnu g++-12-aarch64-linux-gnu \
+            uboot-mkimage device-tree-compiler dwarves
+
+      - name: Checkout kernel
+        run: |
+          git clone --depth=1 --branch $KERNEL_BRANCH $KERNEL_REPO kernel
+
+      - name: Apply kernel patches
+        run: |
+          set -e
+          if [ -d "kernel_patches" ]; then
+            for p in kernel_patches/*.patch; do
+              [ -f "$p" ] || continue
+              echo "Applying $p"
+              patch -p1 -d kernel < "$p"
+            done
+          fi
+          if [ -d "kernel_configs" ]; then
+            cp -v kernel_configs/* kernel/ 2>/dev/null || true
+          fi
+
+      - name: Prep defconfig
+        run: |
+          cd kernel
+          make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=../out ${{ inputs.kernel_defconfig }} -j$(nproc)
+
+      - name: Build kernel + DTBs + Image.gz
+        run: |
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          make -j"$J" ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- O=out Image.gz dtbs
+
+      - name: Build arch-boot.img
+        run: |
+          bash scripts/mkbootimg_arch.sh out/arch/arm64/boot/Image.gz out/arch/arm64/boot/dts/qcom sdm660-oppo-r11t.dtb
+
+      - name: Upload boot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppo-r11t-boot-${{ github.run_number }}
+          path: build/boot-r11t-arch.img
+          retention-days: 14
+
+      - name: Upload boot zip (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppo-r11t-boot-zip-${{ github.run_number }}
+          path: build/boot-r11t-arch.zip
+          retention-days: 14
+YML
