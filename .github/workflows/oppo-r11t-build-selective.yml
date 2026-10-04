@@ -4,29 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       check_dir:
-        description: "快速语法检查目录（留空=跳过）。例：drivers/cpufreq/  或  drivers/cpufreq/ sound/soc/codecs/"
+        description: "快速语法检查目录（留空=跳过）. 例：drivers/cpufreq/  或  drivers/cpufreq/ sound/soc/codecs/"
         type: string
         default: "drivers/cpufreq/"
       build_boot:
         description: "生成 boot（Image + sdm660-oppo-r11t.dtb）"
         type: boolean
         default: false
-      build_modules:
-        description: "生成 modules 归档"
+      build_full_modules:
+        description: "生成完整 modules-r11t-gcc.tar.zst（全量 modules，耗时 ~50-90 分钟）"
         type: boolean
         default: false
-      modules_scope:
-        description: "modules 构建范围"
-        type: choice
-        default: all
-        options:
-          - all
-          - cpufreq
-          - custom
-      modules_custom_m:
-        description: "仅 modules_scope=custom 时生效，填 M= 的目录，空格分隔"
-        type: string
-        default: ""
       make_jobs:
         description: "并行度 -j，留空=自动 nproc"
         type: string
@@ -41,59 +29,8 @@ jobs:
   quick-check:
     name: Quick syntax check
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
     if: ${{ inputs.check_dir != '' }}
-    steps:
-      - name: Checkout deployment (self)
-        uses: actions/checkout@v4
-        with:
-          path: deploy
-      - name: Checkout kernel fork
-        uses: actions/checkout@v4
-        with:
-          repository: mv600/linux-sdm660-oppor11-t
-          ref: qcom-sdm660-7.0.y
-          path: deploy/linux
-      - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison flex cpio rsync xz-utils bzip2 \
-            device-tree-compiler gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross libssl-dev libelf-dev python3-pip kmod
-      - name: Configure
-        run: |
-          cd "$GITHUB_WORKSPACE/deploy/linux"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= sdm660_defconfig
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
-          ./scripts/config --file build/.config \
-            --set-str LOCALVERSION "$LOCALV" --disable LOCALVERSION_AUTO
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
-      - name: Prepare (generate asm-offsets.h / prepare)
-        run: |
-          cd "$GITHUB_WORKSPACE/deploy/linux"
-          J="${{ inputs.make_jobs }}"
-          [ -z "$J" ] && J="$(nproc)"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
-          test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
-      - name: Compile check only (no link, no packaging)
-        run: |
-          cd "$GITHUB_WORKSPACE/deploy/linux"
-          J="${{ inputs.make_jobs }}"
-          [ -z "$J" ] && J="$(nproc)"
-          # 目录目标：只编译 .o，不链接 .ko、不跑 modpost，几分钟内有语法/类型报错
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
-            -j"$J" ${{ inputs.check_dir }}
-      - name: Summary
-        run: |
-          echo "OK: 语法检查通过 [${{ inputs.check_dir }}]"
-
-  build:
-    name: Build artifacts
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    needs: [quick-check]
-    if: ${{ always() && (inputs.build_boot || inputs.build_modules) && needs.quick-check.result != 'failure' }}
     steps:
       - name: Checkout deployment (self)
         uses: actions/checkout@v4
@@ -127,47 +64,118 @@ jobs:
           [ -z "$J" ] && J="$(nproc)"
           make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
           test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
-      - name: Build boot
-        if: ${{ inputs.build_boot }}
+      - name: Compile directory targets (syntax-only)
         run: |
           cd "$GITHUB_WORKSPACE/deploy/linux"
           J="${{ inputs.make_jobs }}"
           [ -z "$J" ] && J="$(nproc)"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
-            -j"$J" Image qcom/sdm660-oppo-r11t.dtb
-          ls -la build/arch/arm64/boot/Image \
-                  build/arch/arm64/boot/dts/qcom/sdm660-oppo-r11t.dtb
-      - name: Build modules
-        if: ${{ inputs.build_modules }}
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" ${{ inputs.check_dir }}
+      - name: Summary
+        run: |
+          echo "OK: syntax check passed for ${{ inputs.check_dir }}"
+
+  build-boot-only:
+    name: Build boot only
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [quick-check]
+    if: ${{ always() && inputs.build_boot && needs.quick-check.result != 'failure' }}
+    steps:
+      - name: Checkout deployment (self)
+        uses: actions/checkout@v4
+        with:
+          path: deploy
+      - name: Checkout kernel fork
+        uses: actions/checkout@v4
+        with:
+          repository: mv600/linux-sdm660-oppor11-t
+          ref: qcom-sdm660-7.0.y
+          path: deploy/linux
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex cpio rsync xz-utils bzip2 \
+            device-tree-compiler gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross libssl-dev libelf-dev python3-pip kmod \
+            uboot-mkimage dwarves
+      - name: Configure
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= sdm660_defconfig
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
+          ./scripts/config --file build/.config \
+            --set-str LOCALVERSION "$LOCALV" --disable LOCALVERSION_AUTO
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
+      - name: Prepare
         run: |
           cd "$GITHUB_WORKSPACE/deploy/linux"
           J="${{ inputs.make_jobs }}"
           [ -z "$J" ] && J="$(nproc)"
-          SCOPE="${{ inputs.modules_scope }}"
-          case "$SCOPE" in
-            all)
-              make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
-                -j"$J" modules
-              ;;
-            cpufreq)
-              # 不要用 M=：M= 完全绕过 prepare，会在 asm-offsets.h 缺失时
-              # 让 KBUILD_CFLAGS 带出空的 -mstack-protector-guard-offset=
-              make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
-                -j"$J" drivers/cpufreq/
-              ;;
-            custom)
-              D="${{ inputs.modules_custom_m }}"
-              if [ -z "$D" ]; then
-                echo "::error::modules_scope=custom 时 modules_custom_m 不能为空"
-                exit 1
-              fi
-              # 目录目标形式，每个目录都要带尾斜杠
-              make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
-                -j"$J" $(echo "$D" | sed 's/\\([^ ]*\)\\([^ ]*\)$/\\1\/\\2\//g')
-              ;;
-          esac
-      - name: Install + archive module set
-        if: ${{ inputs.build_modules }}
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
+          test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
+      - name: Build Image + DTB
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" Image qcom/sdm660-oppo-r11t.dtb
+      - name: Upload boot artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: oppo-r11t-boot
+          if-no-files-found: error
+          path: |
+            deploy/linux/build/arch/arm64/boot/Image
+            deploy/linux/build/arch/arm64/boot/dts/qcom/sdm660-oppo-r11t.dtb
+
+  build-full-modules:
+    name: Build full modules (slow)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    needs: [quick-check]
+    if: ${{ always() && inputs.build_full_modules && needs.quick-check.result != 'failure' }}
+    steps:
+      - name: Checkout deployment (self)
+        uses: actions/checkout@v4
+        with:
+          path: deploy
+      - name: Checkout kernel fork
+        uses: actions/checkout@v4
+        with:
+          repository: mv600/linux-sdm660-oppor11-t
+          ref: qcom-sdm660-7.0.y
+          path: deploy/linux
+      - name: Install toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex cpio rsync xz-utils bzip2 \
+            device-tree-compiler gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross libssl-dev libelf-dev python3-pip kmod \
+            dwarves
+      - name: Configure
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= sdm660_defconfig
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
+          ./scripts/config --file build/.config \
+            --set-str LOCALVERSION "$LOCALV" --disable LOCALVERSION_AUTO
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
+      - name: Prepare
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
+          test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
+      - name: Build modules (full)
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" modules
+      - name: Install + archive modules
         run: |
           cd "$GITHUB_WORKSPACE/deploy/linux"
           REL=$(make -s O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= kernelrelease)
@@ -176,7 +184,6 @@ jobs:
             echo "::error::kernel release mismatch: got $REL want $VER$LOCALV"
             exit 1
           fi
-          echo "kernel_release=$REL" >> "$GITHUB_ENV"
           rm -rf out/modroot
           make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
             modules_install INSTALL_MOD_PATH="$PWD/out/modroot" INSTALL_MOD_STRIP=1
@@ -184,21 +191,9 @@ jobs:
           depmod -b out/modroot "$REL"
           tar --zstd -cf "$GITHUB_WORKSPACE/modules-r11t-gcc.tar.zst" \
             -C out/modroot "lib/modules/$REL"
-          echo "--- 归档内容 ---"
-          tar --zstd -tvf "$GITHUB_WORKSPACE/modules-r11t-gcc.tar.zst" | head -20
       - name: Upload module archive
-        if: ${{ inputs.build_modules }}
         uses: actions/upload-artifact@v4
         with:
           name: modules-r11t-gcc
           if-no-files-found: error
           path: modules-r11t-gcc.tar.zst
-      - name: Upload boot artifacts
-        if: ${{ inputs.build_boot }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: oppo-r11t-boot
-          if-no-files-found: error
-          path: |
-            deploy/linux/build/arch/arm64/boot/Image
-            deploy/linux/build/arch/arm64/boot/dts/qcom/sdm660-oppo-r11t.dtb
