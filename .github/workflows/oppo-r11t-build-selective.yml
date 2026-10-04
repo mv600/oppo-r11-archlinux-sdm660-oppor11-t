@@ -237,6 +237,8 @@ jobs:
           J="${{ inputs.make_jobs }}"
           [ -z "$J" ] && J="$(nproc)"
           make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" modules
+        env:
+          KBUILD_MODPOST_WARN: "1"
       - name: Install + archive modules
         run: |
           cd "$GITHUB_WORKSPACE/deploy/linux"
