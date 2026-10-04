@@ -113,20 +113,84 @@ jobs:
           [ -z "$J" ] && J="$(nproc)"
           make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
           test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
-      - name: Build Image + DTB
+      - name: Build static aarch64 busybox
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          curl -fsSL -o busybox.tar.bz2 https://busybox.net/downloads/busybox-1.36.1.tar.bz2
+          tar xf busybox.tar.bz2 && cd busybox-1.36.1
+          make defconfig
+          sed -i 's/# CONFIG_STATIC is not set/CONFIG_STATIC=y/' .config
+          # tc is broken with new kernel UAPI headers (TCA_CBQ_* removed);
+          # not needed in the initramfs.
+          sed -i 's/^CONFIG_TC=y/# CONFIG_TC is not set/' .config
+          make oldconfig </dev/null >/dev/null 2>&1
+          make -j"$(nproc)" CROSS_COMPILE=aarch64-linux-gnu-
+      - name: Build kernel Image.gz + dtb
         run: |
           cd "$GITHUB_WORKSPACE/deploy/linux"
           J="${{ inputs.make_jobs }}"
           [ -z "$J" ] && J="$(nproc)"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" Image qcom/sdm660-oppo-r11t.dtb
-      - name: Upload boot artifacts
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" Image.gz qcom/sdm660-oppo-r11t.dtb
+      - name: Verify kernel release (sdm660-gcc+)
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          REL=$(cat build/include/config/kernel.release)
+          VER=$(make -s O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= kernelversion)
+          if [ "$REL" != "$VER$LOCALV" ]; then
+            echo "::error::kernel release mismatch: got $REL want $VER$LOCALV"
+            exit 1
+          fi
+          echo "kernel release: $REL"
+      - name: Build boot initramfs (busybox + init.arch)
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          IR=$GITHUB_WORKSPACE/initramfs-root
+          rm -rf "$IR"
+          mkdir -p "$IR"/{bin,dev,proc,sys,newroot}
+          cp busybox-1.36.1/busybox "$IR/bin/busybox"
+          aarch64-linux-gnu-strip "$IR/bin/busybox"
+          cp deploy/initramfs/init.arch "$IR/init"
+          chmod 0755 "$IR/init"
+          ( cd "$IR" && find . -print0 | cpio --null -ov --format=newc ) | \
+            gzip -9 > deploy/linux/build/r11t-arch-initramfs.cpio.gz
+      - name: Pack Image.gz-dtb
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux/build"
+          cp arch/arm64/boot/Image.gz Image.gz-dtb
+          dd if=arch/arm64/boot/dts/qcom/sdm660-oppo-r11t.dtb \
+            of=Image.gz-dtb oflag=append conv=notrunc status=none
+      - name: mkbootimg
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          rm -rf mkbootimg
+          git clone --depth 1 https://github.com/osm0sis/mkbootimg
+          cd mkbootimg
+          # osm0sis/mkbootimg builds with -Werror; new gcc turns its
+          # warnings into errors, so drop -Werror. Use host cc (x86_64).
+          sed -i 's/-Werror//g' Makefile libmincrypt/Makefile
+          make
+          ./mkbootimg --kernel "$GITHUB_WORKSPACE/deploy/linux/build/Image.gz-dtb" \
+            --ramdisk "$GITHUB_WORKSPACE/deploy/linux/build/r11t-arch-initramfs.cpio.gz" \
+            --pagesize 4096 --base 0x80000000 \
+            --kernel_offset 0x00008000 --ramdisk_offset 0x03000000 \
+            --second_offset 0x00f00000 --tags_offset 0x00000100 \
+            --header_version 1 --os_version 9.0.0 --os_patch_level 2019-09 \
+            --cmdline 'console=tty0 console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=7 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init' \
+            -o "$GITHUB_WORKSPACE/boot-r11t-arch.img"
+      - name: Verify boot header + size
+        run: |
+          [ "$(dd if=boot-r11t-arch.img bs=8 count=1 status=none)" = 'ANDROID!' ]
+          size=$(stat -c%s boot-r11t-arch.img)
+          [ "$size" -le 67108864 ]
+          [ $((size % 4096)) -eq 0 ] || { echo "::error::not page-aligned: $size"; exit 1; }
+          echo "boot-r11t-arch.img: $size bytes"
+          sha256sum boot-r11t-arch.img
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: oppo-r11t-boot
+          name: oppo-r11t-arch-boot
           if-no-files-found: error
-          path: |
-            deploy/linux/build/arch/arm64/boot/Image
-            deploy/linux/build/arch/arm64/boot/dts/qcom/sdm660-oppo-r11t.dtb
+          path: boot-r11t-arch.img
 
   build-full-modules:
     name: Build full modules (slow)
