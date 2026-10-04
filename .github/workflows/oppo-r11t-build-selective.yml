@@ -69,6 +69,13 @@ jobs:
           ./scripts/config --file build/.config \
             --set-str LOCALVERSION "$LOCALV" --disable LOCALVERSION_AUTO
           make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
+      - name: Prepare (generate asm-offsets.h / prepare)
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
+          test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
       - name: Compile check only (no link, no packaging)
         run: |
           cd "$GITHUB_WORKSPACE/deploy/linux"
