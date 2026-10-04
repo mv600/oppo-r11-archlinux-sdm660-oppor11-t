@@ -120,6 +120,13 @@ jobs:
           ./scripts/config --file build/.config \
             --set-str LOCALVERSION "$LOCALV" --disable LOCALVERSION_AUTO
           make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
+      - name: Prepare (generate asm-offsets.h)
+        run: |
+          cd "$GITHUB_WORKSPACE/deploy/linux"
+          J="${{ inputs.make_jobs }}"
+          [ -z "$J" ] && J="$(nproc)"
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
+          test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
       - name: Build boot
         if: ${{ inputs.build_boot }}
         run: |
@@ -143,17 +150,20 @@ jobs:
                 -j"$J" modules
               ;;
             cpufreq)
+              # 不要用 M=：M= 完全绕过 prepare，会在 asm-offsets.h 缺失时
+              # 让 KBUILD_CFLAGS 带出空的 -mstack-protector-guard-offset=
               make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
-                -j"$J" KBUILD_MODPOST_WARN=1 M=drivers/cpufreq modules
+                -j"$J" drivers/cpufreq/
               ;;
             custom)
-              M="${{ inputs.modules_custom_m }}"
-              if [ -z "$M" ]; then
+              D="${{ inputs.modules_custom_m }}"
+              if [ -z "$D" ]; then
                 echo "::error::modules_scope=custom 时 modules_custom_m 不能为空"
                 exit 1
               fi
+              # 目录目标形式，每个目录都要带尾斜杠
               make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= \
-                -j"$J" KBUILD_MODPOST_WARN=1 M="$M" modules
+                -j"$J" $(echo "$D" | sed 's/\\([^ ]*\)\\([^ ]*\)$/\\1\/\\2\//g')
               ;;
           esac
       - name: Install + archive module set
