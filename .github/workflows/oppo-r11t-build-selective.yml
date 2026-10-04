@@ -183,7 +183,7 @@ jobs:
           J="${{ inputs.make_jobs }}"
           [ -z "$J" ] && J="$(nproc)"
           echo "::group::step start $(date -u +%T)"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" vmlinux.o
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" vmlinux_o
           echo "::endgroup::"
           test -f build/vmlinux.o || { echo "::error::vmlinux.o not produced"; exit 1; }
           ls -la build/vmlinux.o
