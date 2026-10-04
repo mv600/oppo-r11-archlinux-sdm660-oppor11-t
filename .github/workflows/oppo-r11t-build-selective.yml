@@ -15,14 +15,6 @@ on:
         description: "生成完整 modules-r11t-gcc.tar.zst（全量 modules，耗时 ~50-90 分钟）"
         type: boolean
         default: false
-      build_single_module:
-        description: "只生成单个模块（需 build_single_obj）"
-        type: boolean
-        default: false
-      build_single_obj:
-        description: "单模块目标（无扩展名）。例：drivers/cpufreq/qcom_r11t_osm_cpufreq"
-        type: string
-        default: "drivers/cpufreq/qcom_r11t_osm_cpufreq"
       make_jobs:
         description: "并行度 -j，留空=自动 nproc"
         type: string
@@ -136,80 +128,6 @@ jobs:
           path: |
             deploy/linux/build/arch/arm64/boot/Image
             deploy/linux/build/arch/arm64/boot/dts/qcom/sdm660-oppo-r11t.dtb
-
-  build-single-module:
-    name: Build single module (needs vmlinux.o)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    needs: [quick-check]
-    if: ${{ always() && inputs.build_single_module && needs.quick-check.result != 'failure' }}
-    steps:
-      - name: Checkout deployment (self)
-        uses: actions/checkout@v4
-        with:
-          path: deploy
-      - name: Checkout kernel fork
-        uses: actions/checkout@v4
-        with:
-          repository: mv600/linux-sdm660-oppor11-t
-          ref: qcom-sdm660-7.0.y
-          path: deploy/linux
-      - name: Install toolchain
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            bc bison flex cpio rsync xz-utils bzip2 \
-            device-tree-compiler gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross libssl-dev libelf-dev python3-pip kmod \
-            dwarves
-      - name: Configure
-        run: |
-          cd "$GITHUB_WORKSPACE/deploy/linux"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= sdm660_defconfig
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
-          ./scripts/config --file build/.config \
-            --set-str LOCALVERSION "$LOCALV" --disable LOCALVERSION_AUTO
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= olddefconfig
-      - name: Prepare
-        run: |
-          cd "$GITHUB_WORKSPACE/deploy/linux"
-          J="${{ inputs.make_jobs }}"
-          [ -z "$J" ] && J="$(nproc)"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" prepare
-          test -f build/include/generated/asm-offsets.h || { echo "::error::asm-offsets.h missing"; exit 1; }
-      - name: Build vmlinux.o (produces the symbol table modpost needs)
-        run: |
-          cd "$GITHUB_WORKSPACE/deploy/linux"
-          J="${{ inputs.make_jobs }}"
-          [ -z "$J" ] && J="$(nproc)"
-          echo "::group::step start $(date -u +%T)"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" vmlinux_o
-          echo "::endgroup::"
-          test -f build/vmlinux.o || { echo "::error::vmlinux.o not produced"; exit 1; }
-          ls -la build/vmlinux.o
-      - name: Build the single module
-        run: |
-          cd "$GITHUB_WORKSPACE/deploy/linux"
-          J="${{ inputs.make_jobs }}"
-          [ -z "$J" ] && J="$(nproc)"
-          OBJ="${{ inputs.build_single_obj }}"
-          REL=$(make -s O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= kernelrelease)
-          echo "target=$OBJ  release=$REL"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" "$OBJ.ko"
-          KO="build/${OBJ}.ko"
-          test -f "$KO" || { echo "::error::$KO not produced"; exit 1; }
-          aarch64-linux-gnu-strip --strip-unneeded "$KO"
-          mkdir -p "out/modroot/lib/modules/$REL/kernel/$(dirname "$OBJ")"
-          cp "$KO" "out/modroot/lib/modules/$REL/kernel/$(dirname "$OBJ")/"
-          depmod -b out/modroot "$REL" || true
-          tar --zstd -cf "$GITHUB_WORKSPACE/single-module.tar.zst" \
-            -C out/modroot "lib/modules/$REL"
-      - name: Upload single module
-        uses: actions/upload-artifact@v4
-        with:
-          name: single-module
-          if-no-files-found: error
-          path: single-module.tar.zst
 
   build-full-modules:
     name: Build full modules (slow)
