@@ -1,5 +1,3 @@
-mkdir -p upload/oppo-r11-archlinux-sdm660-oppor11-t/.github/workflows
-cat > upload/oppo-r11-archlinux-sdm660-oppor11-t/.github/workflows/oppo-r11t-build-selective.yml << 'YML'
 name: oppo-r11t - selective build (manual)
 
 on:
@@ -255,4 +253,3 @@ jobs:
           name: oppo-r11t-boot-zip-${{ github.run_number }}
           path: build/boot-r11t-arch.zip
           retention-days: 14
-YML
