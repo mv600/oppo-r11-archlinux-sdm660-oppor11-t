@@ -90,7 +90,7 @@ mkbootimg \
 	--header_version 1 \
 	--os_version 9.0.0 \
 	--os_patch_level 2019-09 \
-	--cmdline 'console=tty0 console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=7 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init' \
+	--cmdline 'console=tty0 console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=7 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init fbcon=font:SUN12x22' \
 	-o "$OUTPUT"
 
 image_size=$(stat -c %s "$OUTPUT")
