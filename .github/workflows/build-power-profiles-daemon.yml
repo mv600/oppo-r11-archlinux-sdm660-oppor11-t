@@ -90,7 +90,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/ppd-package"
-          docker run --rm \
+          docker run --rm --privileged \
             --platform linux/arm64 \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             --workdir /workspace \
