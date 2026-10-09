@@ -1,0 +1,166 @@
+name: Build R11T power-profiles-daemon
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'archlinux/power-profiles-daemon-r11t/**'
+      - '.github/workflows/build-power-profiles-daemon.yml'
+  pull_request:
+    paths:
+      - 'archlinux/power-profiles-daemon-r11t/**'
+      - '.github/workflows/build-power-profiles-daemon.yml'
+  workflow_run:
+    workflows:
+      - 'unpack browser-upload'
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+concurrency:
+  group: power-profiles-daemon-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect_changes:
+    name: Detect PPD changes
+    runs-on: ubuntu-latest
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    outputs:
+      build: ${{ steps.filter.outputs.build }}
+
+    steps:
+      - name: Checkout triggering revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.workflow_run.head_branch || github.ref }}
+
+      - name: Check whether unpacking changed PPD files
+        id: filter
+        env:
+          RUN_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" != "workflow_run" ]]; then
+            build=true
+          else
+            test -n "$RUN_HEAD_SHA"
+            if ! git cat-file -e "$RUN_HEAD_SHA^{commit}" 2>/dev/null; then
+              git fetch --no-tags origin "$RUN_HEAD_SHA"
+            fi
+            changed="$(git diff --name-only "$RUN_HEAD_SHA"..HEAD -- \
+              archlinux/power-profiles-daemon-r11t \
+              .github/workflows/build-power-profiles-daemon.yml)"
+            if [[ -n "$changed" ]]; then
+              printf 'Changed PPD files:\n%s\n' "$changed"
+              build=true
+            else
+              build=false
+            fi
+          fi
+          echo "build=$build" >> "$GITHUB_OUTPUT"
+
+  build-aarch64:
+    name: Build aarch64 Arch package
+    needs: detect_changes
+    if: needs.detect_changes.outputs.build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v4
+
+      - name: Validate delivery layout
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/archlinux/power-profiles-daemon-r11t"
+          test -f "$package_dir/PKGBUILD"
+          test -f "$package_dir/power-profiles-daemon-r11t-osm.patch"
+          test -f "$package_dir/src/ppd-driver-r11t-osm.c"
+          test -f "$package_dir/src/ppd-driver-r11t-osm.h"
+          bash -n "$package_dir/PKGBUILD"
+
+      - name: Build package in Arch Linux ARM
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ppd-package"
+          docker run --rm \
+            --platform linux/arm64 \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            menci/archlinuxarm:base-devel \
+            bash -euxo pipefail -c '
+              pacman -Syu --noconfirm
+
+              package_dir=/workspace/archlinux/power-profiles-daemon-r11t
+              output_dir=/workspace/ppd-package
+              build_dir=/build/power-profiles-daemon
+
+              rm -rf "$build_dir"
+              install -d -m 0755 "$build_dir" "$output_dir"
+              cp -a "$package_dir/." "$build_dir/"
+
+              if ! id builder >/dev/null 2>&1; then
+                useradd --create-home --shell /bin/bash builder
+              fi
+              printf "%s\n" "builder ALL=(ALL) NOPASSWD: ALL" \
+                > /etc/sudoers.d/makepkg-builder
+              chmod 0440 /etc/sudoers.d/makepkg-builder
+              chown -R builder:builder "$build_dir"
+              chown builder:builder "$output_dir"
+
+              runuser -u builder -- env HOME=/home/builder \
+                bash -euxo pipefail -c "
+                  cd \"$build_dir\"
+                  makepkg --syncdeps --noconfirm --cleanbuild --clean --log
+                "
+
+              package="$(find "$build_dir" -maxdepth 1 -type f \
+                -name "*.pkg.tar.zst" -print -quit)"
+              test -n "$package"
+              pacman -Qip "$package"
+              pacman -Qlp "$package" | grep -F /power-profiles-daemon
+              install -m 0644 "$package" "$output_dir/"
+            '
+
+      - name: Checksum and document package
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/ppd-package"
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+          cat > INSTALL.md <<'EOF'
+          # Install the R11T PPD package
+
+          1. Disable the old polling bridge before installing:
+
+             sudo systemctl disable --now r11t-ppd-osm.service
+
+          2. Install the generated package:
+
+             sudo pacman -U power-profiles-daemon-*.pkg.tar.zst
+
+          3. Restart both services:
+
+             sudo systemctl restart power-profiles-daemon.service
+             sudo systemctl restart plasma-powerdevil.service
+
+          4. Verify that Profiles[].Driver reports `r11t_osm`, not `placeholder`.
+          EOF
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: power-profiles-daemon-r11t-aarch64
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ppd-package/*.pkg.tar.zst
+            ppd-package/SHA256SUMS
+            ppd-package/INSTALL.md
