@@ -1,0 +1,156 @@
+name: Build R11T kwin
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'archlinux/kwin-r11t/**'
+      - '.github/workflows/build-kwin.yml'
+  pull_request:
+    paths:
+      - 'archlinux/kwin-r11t/**'
+      - '.github/workflows/build-kwin.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kwin-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-aarch64:
+    name: Build aarch64 kwin package
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v4
+
+      - name: Validate delivery layout
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/archlinux/kwin-r11t"
+          test -f "$package_dir/PKGBUILD"
+          test -f "$package_dir/0001-kwin-drm-EBUSY-retry-with-saved-errno.patch"
+          bash -n "$package_dir/PKGBUILD"
+
+      - name: Verify patch against the released kwin sources
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/archlinux/kwin-r11t"
+          work="$RUNNER_TEMP/kwin-patch-check"
+          rm -rf "$work"
+          mkdir -p "$work"
+          cd "$work"
+          curl -fsSLO "https://download.kde.org/stable/plasma/6.7.5/kwin-6.7.5.tar.xz"
+          echo "6baa910b732d93c48c90f9c1cc685cc93d0b8de0cdf138c24192c045bc3a48e2  kwin-6.7.5.tar.xz" \
+            | sha256sum -c -
+          tar xf kwin-6.7.5.tar.xz
+          patch --dry-run -d kwin-6.7.5 -p1 \
+            -i "$package_dir/0001-kwin-drm-EBUSY-retry-with-saved-errno.patch"
+
+      - name: Build package in Arch Linux ARM
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/kwin-package"
+          docker run --rm --privileged \
+            --platform linux/arm64 \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            menci/archlinuxarm:base-devel \
+            bash -euxo pipefail -c '
+              pacman -Syu --noconfirm
+
+              package_dir=/workspace/archlinux/kwin-r11t
+              output_dir=/workspace/kwin-package
+              build_dir=/build/kwin
+
+              rm -rf "$build_dir"
+              install -d -m 0755 "$build_dir" "$output_dir"
+              cp -a "$package_dir/." "$build_dir/"
+
+              if ! id builder >/dev/null 2>&1; then
+                useradd --create-home --shell /bin/bash builder
+              fi
+              printf "%s\n" "builder ALL=(ALL) NOPASSWD: ALL" \
+                > /etc/sudoers.d/makepkg-builder
+              chmod 0440 /etc/sudoers.d/makepkg-builder
+              chown -R builder:builder "$build_dir"
+              chown builder:builder "$output_dir"
+
+              printf "PKGDEST=%s\nPKGEXT=.pkg.tar.zst\n" "$output_dir" \
+                >> /etc/makepkg.conf
+
+              runuser -u builder -- env HOME=/home/builder \
+                bash -euxo pipefail -c "
+                  cd \"$build_dir\"
+                  makepkg --syncdeps --noconfirm --cleanbuild --log
+                "
+
+              ls -la "$output_dir"
+
+              package="$(find "$output_dir" -maxdepth 1 -type f \
+                -name "*.pkg.tar.zst" -print -quit)"
+              test -n "$package"
+              pacman -Qip "$package"
+              pacman -Qlp "$package" | grep -F /usr/bin/kwin_wayland
+              pacman -Qlp "$package" | grep -F /usr/lib/kwin
+
+              chmod 0644 "$output_dir"/*.pkg.tar.zst
+              chmod 0777 "$output_dir"
+            '
+
+      - name: Checksum and document package
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/kwin-package"
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+          cat > INSTALL.md <<'EOF'
+          # Install the R11T kwin package
+
+          This package is kwin 6.7.5-3.1 with the DRM atomic-commit EBUSY
+          retry patch applied.  It replaces the distribution `kwin` package,
+          so keep the old package file around as a rollback path.
+
+          1. Keep a rollback copy of the currently installed package:
+
+             pacman -Q kwin
+             sudo cp /var/cache/pacman/pkg/kwin-*.pkg.tar.zst /root/
+
+          2. Install the generated package:
+
+             sudo pacman -U kwin-6.7.5-3.1-aarch64.pkg.tar.zst
+
+          3. Log out of Plasma and restart the display manager so the new
+             compositor binary is loaded:
+
+             sudo systemctl restart sddm.service
+
+          4. Verify the patched behaviour in the user journal:
+
+             journalctl _COMM=kwin_wayland -b | grep 'atomic commit failed'
+
+             The retry patch logs the saved errno and retries an EBUSY commit
+             up to three times, so repeated single-shot EBUSY failures should
+             no longer terminate the commit.
+
+          5. Roll back if the desktop does not come up:
+
+             sudo pacman -U /root/kwin-OLDVERSION.pkg.tar.zst
+          EOF
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: kwin-r11t-aarch64
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            kwin-package/*.pkg.tar.zst
+            kwin-package/SHA256SUMS
+            kwin-package/INSTALL.md

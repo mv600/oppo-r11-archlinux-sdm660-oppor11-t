@@ -1,0 +1,43 @@
+--- a/src/backends/drm/drm_commit_thread.cpp
++++ b/src/backends/drm/drm_commit_thread.cpp
+@@ -152,7 +152,9 @@
+     DrmAtomicCommit *commit = m_commits.front().get();
+     const auto vrr = commit->isVrr();
+     const bool success = commit->commit();
++    const int commitErrno = success ? 0 : errno;
+     if (success) {
++        m_ebusyRetries = 0;
+         m_vrr = vrr.value_or(m_vrr);
+         m_tearing = commit->isTearing();
+         m_committed = std::move(m_commits.front());
+@@ -179,6 +181,11 @@
+         m_additionalSafetyMargin = std::clamp(m_additionalSafetyMargin, 0ns, maximumReasonableMargin);
+         m_safetyMargin = m_baseSafetyMargin + m_additionalSafetyMargin;
+     } else {
++        if (commitErrno == EBUSY && m_ebusyRetries < 3) {
++            ++m_ebusyRetries;
++            std::this_thread::sleep_for(std::chrono::milliseconds(1));
++            return;
++        }
+         if (m_commits.size() > 1) {
+             // the failure may have been because of the reordering of commits
+             // -> collapse all commits into one and try again with an already tested state
+@@ -196,7 +203,7 @@
+             m_commitsToDelete.push_back(std::move(commit));
+         }
+         m_commits.clear();
+-        qCWarning(KWIN_DRM) << "atomic commit failed:" << strerror(errno);
++        qCWarning(KWIN_DRM) << "atomic commit failed:" << strerror(commitErrno);
+     }
+     QMetaObject::invokeMethod(this, &DrmCommitThread::clearDroppedCommits, Qt::ConnectionType::QueuedConnection);
+ }
+--- a/src/backends/drm/drm_commit_thread.h
++++ b/src/backends/drm/drm_commit_thread.h
+@@ -70,6 +70,7 @@
+     std::chrono::nanoseconds m_additionalSafetyMargin = std::chrono::milliseconds(1);
+     bool m_ping = false;
+     bool m_pageflipTimeoutDetected = false;
++    int m_ebusyRetries = 0;
+ };
+ 
+ }
