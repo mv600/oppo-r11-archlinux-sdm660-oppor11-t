@@ -1,0 +1,52 @@
+# Maintainer: R11T Arch Linux ARM integration
+pkgname=power-profiles-daemon
+pkgver=0.30
+pkgrel=2
+pkgdesc='Makes power profiles handling available over D-Bus (R11T OSM platform driver)'
+url='https://gitlab.freedesktop.org/upower/power-profiles-daemon'
+license=(GPL-3.0-only)
+arch=(aarch64)
+depends=(glib2
+         glibc
+         libgcc
+         libgudev
+         polkit
+         upower)
+optdepends=('python-gobject: for powerprofilesctl')
+makedepends=(bash-completion
+             glib2-devel
+             python-argparse-manpage
+             python-shtab
+             meson)
+checkdepends=(python-dbusmock
+              python-isort
+              python-mccabe
+              umockdev)
+source=("$pkgname-$pkgver.tar.gz::https://gitlab.freedesktop.org/upower/$pkgname/-/archive/$pkgver/$pkgname-$pkgver.tar.gz"
+        'power-profiles-daemon-r11t-osm.patch')
+sha256sums=('90f2c95024861d9f4062abedd514084939224e7a49edd468f001af7260ec8e6c'
+            'e2fd3b34f80f94f8c93cebd4ea85f414f2fd16a6e0d1f7e7fac4644439f1edaa')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  patch -Np1 -i "$srcdir/power-profiles-daemon-r11t-osm.patch"
+}
+
+build() {
+  meson "$pkgname-$pkgver" build \
+    --prefix /usr \
+    --libexec lib \
+    --sysconfdir /usr/share \
+    -Dzshcomp=/usr/share/zsh/site-functions \
+    -Dbashcomp=enabled \
+    -Dmanpage=enabled
+  meson compile -C build
+}
+
+check() {
+  meson test -C build
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+}
