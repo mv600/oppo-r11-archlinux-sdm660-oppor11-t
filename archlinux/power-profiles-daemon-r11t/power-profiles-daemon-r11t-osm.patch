@@ -49,16 +49,20 @@ index 01aac72..ad7ed84 100644
    if (profile_str == NULL)
 diff --git a/src/ppd-driver-r11t-osm.c b/src/ppd-driver-r11t-osm.c
 new file mode 100644
-index 0000000..4c279d6
+index 0000000..9e22447
 --- /dev/null
 +++ b/src/ppd-driver-r11t-osm.c
-@@ -0,0 +1,312 @@
+@@ -0,0 +1,348 @@
 +/*
 + * R11T OSM power-profiles-daemon platform driver.
 + *
 + * The R11T kernel exposes two cpufreq policies backed by the qcom_r11t_osm
 + * driver. PPD already owns the D-Bus profile state, so this driver applies
-+ * the same policy caps previously handled by r11t-ppd-osm-watch.sh.
++ * the same policy limits previously handled by r11t-ppd-osm-watch.sh:
++ *
++ *   power-saver  - cap the maximum frequency of both clusters
++ *   balanced     - restore both clusters to their hardware limits
++ *   performance  - pin both clusters to their maximum frequency
 + */
 +
 +#define G_LOG_DOMAIN "R11tOsmDriver"
@@ -96,7 +100,8 @@ index 0000000..4c279d6
 +                                                                          construct_params);
 +  g_object_set (object,
 +                "driver-name", R11T_OSM_DRIVER_NAME,
-+                "profiles", PPD_PROFILE_POWER_SAVER | PPD_PROFILE_BALANCED,
++                "profiles", PPD_PROFILE_POWER_SAVER | PPD_PROFILE_BALANCED |
++                            PPD_PROFILE_PERFORMANCE,
 +                NULL);
 +
 +  return object;
@@ -222,18 +227,33 @@ index 0000000..4c279d6
 +}
 +
 +static gboolean
-+restore_policy_value (const gchar *policy,
-+                      guint64      value)
++apply_policy_limits (const gchar  *policy,
++                     guint64       target_min,
++                     guint64       target_max,
++                     GError      **error)
 +{
-+  g_autoptr(GError) error = NULL;
++  guint64 current_min;
++  guint64 current_max;
 +
-+  if (!write_policy_value (policy, "scaling_max_freq", value, &error)) {
-+    g_warning ("Failed to restore %s/scaling_max_freq to %" G_GUINT64_FORMAT ": %s",
-+               policy,
-+               value,
-+               error->message);
++  if (!read_policy_value (policy, "scaling_min_freq", &current_min, error))
 +    return FALSE;
-+  }
++  if (!read_policy_value (policy, "scaling_max_freq", &current_max, error))
++    return FALSE;
++
++  /* Lower the floor before touching the ceiling, and raise the ceiling before
++   * pinning a higher floor, so the kernel never observes min > max. */
++  if (target_min < current_min &&
++      !write_policy_value (policy, "scaling_min_freq", target_min, error))
++    return FALSE;
++  if (target_max > current_max &&
++      !write_policy_value (policy, "scaling_max_freq", target_max, error))
++    return FALSE;
++  if (target_max < current_max &&
++      !write_policy_value (policy, "scaling_max_freq", target_max, error))
++    return FALSE;
++  if (target_min > current_min &&
++      !write_policy_value (policy, "scaling_min_freq", target_min, error))
++    return FALSE;
 +
 +  return TRUE;
 +}
@@ -245,41 +265,51 @@ index 0000000..4c279d6
 +                                      GError                     **error)
 +{
 +  PpdDriverR11tOsm *self = PPD_DRIVER_R11T_OSM (driver);
-+  guint64 pwrcl_target;
-+  guint64 perfcl_target;
-+  guint64 pwrcl_previous;
-+  guint64 perfcl_previous;
-+  guint64 pwrcl_restore;
++  guint64 pwrcl_min;
++  guint64 perfcl_min;
++  guint64 pwrcl_max;
++  guint64 perfcl_max;
++  guint64 pwrcl_target_min;
++  guint64 perfcl_target_min;
++  guint64 pwrcl_target_max;
++  guint64 perfcl_target_max;
 +
 +  if (self->pwrcl_policy == NULL || self->perfcl_policy == NULL) {
 +    if (!find_policies (self, error))
 +      return FALSE;
 +  }
 +
-+  if (!read_policy_value (self->pwrcl_policy,
-+                          "scaling_max_freq",
-+                          &pwrcl_restore,
-+                          error))
++  if (!read_policy_value (self->pwrcl_policy, "cpuinfo_min_freq",
++                          &pwrcl_min, error))
 +    return FALSE;
-+  if (!read_policy_value (self->pwrcl_policy,
-+                          "cpuinfo_max_freq",
-+                          &pwrcl_previous,
-+                          error))
++  if (!read_policy_value (self->perfcl_policy, "cpuinfo_min_freq",
++                          &perfcl_min, error))
 +    return FALSE;
-+  if (!read_policy_value (self->perfcl_policy,
-+                          "cpuinfo_max_freq",
-+                          &perfcl_previous,
-+                          error))
++  if (!read_policy_value (self->pwrcl_policy, "cpuinfo_max_freq",
++                          &pwrcl_max, error))
++    return FALSE;
++  if (!read_policy_value (self->perfcl_policy, "cpuinfo_max_freq",
++                          &perfcl_max, error))
 +    return FALSE;
 +
 +  switch (profile) {
 +  case PPD_PROFILE_POWER_SAVER:
-+    pwrcl_target = R11T_PWRCL_POWER_SAVER_KHZ;
-+    perfcl_target = R11T_PERFCL_POWER_SAVER_KHZ;
++    pwrcl_target_min = pwrcl_min;
++    perfcl_target_min = perfcl_min;
++    pwrcl_target_max = MIN (pwrcl_max, R11T_PWRCL_POWER_SAVER_KHZ);
++    perfcl_target_max = MIN (perfcl_max, R11T_PERFCL_POWER_SAVER_KHZ);
 +    break;
 +  case PPD_PROFILE_BALANCED:
-+    pwrcl_target = pwrcl_previous;
-+    perfcl_target = perfcl_previous;
++    pwrcl_target_min = pwrcl_min;
++    perfcl_target_min = perfcl_min;
++    pwrcl_target_max = pwrcl_max;
++    perfcl_target_max = perfcl_max;
++    break;
++  case PPD_PROFILE_PERFORMANCE:
++    pwrcl_target_min = pwrcl_max;
++    perfcl_target_min = perfcl_max;
++    pwrcl_target_max = pwrcl_max;
++    perfcl_target_max = perfcl_max;
 +    break;
 +  default:
 +    g_set_error (error,
@@ -290,26 +320,32 @@ index 0000000..4c279d6
 +    return FALSE;
 +  }
 +
-+  if (!write_policy_value (self->pwrcl_policy,
-+                           "scaling_max_freq",
-+                           pwrcl_target,
-+                           error))
++  if (!apply_policy_limits (self->pwrcl_policy,
++                            pwrcl_target_min,
++                            pwrcl_target_max,
++                            error))
 +    return FALSE;
 +
-+  if (!write_policy_value (self->perfcl_policy,
-+                           "scaling_max_freq",
-+                           perfcl_target,
-+                           error)) {
-+    restore_policy_value (self->pwrcl_policy, pwrcl_restore);
++  if (!apply_policy_limits (self->perfcl_policy,
++                            perfcl_target_min,
++                            perfcl_target_max,
++                            error)) {
++    g_autoptr(GError) rollback_error = NULL;
++
++    apply_policy_limits (self->pwrcl_policy, pwrcl_min, pwrcl_max,
++                         &rollback_error);
 +    return FALSE;
 +  }
 +
 +  g_info ("Applied profile '%s' (reason: %s): pwrcl=%" G_GUINT64_FORMAT
-+          " kHz, perfcl=%" G_GUINT64_FORMAT " kHz",
++          "-%" G_GUINT64_FORMAT " kHz, perfcl=%" G_GUINT64_FORMAT
++          "-%" G_GUINT64_FORMAT " kHz",
 +          ppd_profile_to_str (profile),
 +          ppd_profile_activation_reason_to_str (reason),
-+          pwrcl_target,
-+          perfcl_target);
++          pwrcl_target_min,
++          pwrcl_target_max,
++          perfcl_target_min,
++          perfcl_target_max);
 +
 +  return TRUE;
 +}
