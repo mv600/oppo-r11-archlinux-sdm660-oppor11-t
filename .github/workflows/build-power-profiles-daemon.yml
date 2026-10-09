@@ -131,6 +131,9 @@ jobs:
               test -n "$package"
               pacman -Qip "$package"
               pacman -Qlp "$package" | grep -F /power-profiles-daemon
+
+              chmod 0644 "$output_dir"/*.pkg.tar.zst
+              chmod 0777 "$output_dir"
             '
 
       - name: Checksum and document package
