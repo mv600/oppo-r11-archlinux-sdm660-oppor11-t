@@ -115,18 +115,22 @@ jobs:
               chown -R builder:builder "$build_dir"
               chown builder:builder "$output_dir"
 
+              printf "PKGDEST=%s\nPKGEXT=.pkg.tar.zst\n" "$output_dir" \
+                >> /etc/makepkg.conf
+
               runuser -u builder -- env HOME=/home/builder \
                 bash -euxo pipefail -c "
                   cd \"$build_dir\"
                   makepkg --syncdeps --noconfirm --cleanbuild --log
                 "
 
-              package="$(find "$build_dir" -maxdepth 1 -type f \
+              ls -la "$output_dir"
+
+              package="$(find "$output_dir" -maxdepth 1 -type f \
                 -name "*.pkg.tar.zst" -print -quit)"
               test -n "$package"
               pacman -Qip "$package"
               pacman -Qlp "$package" | grep -F /power-profiles-daemon
-              install -m 0644 "$package" "$output_dir/"
             '
 
       - name: Checksum and document package
