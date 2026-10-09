@@ -118,7 +118,7 @@ jobs:
               runuser -u builder -- env HOME=/home/builder \
                 bash -euxo pipefail -c "
                   cd \"$build_dir\"
-                  makepkg --syncdeps --noconfirm --cleanbuild --clean --log
+                  makepkg --syncdeps --noconfirm --cleanbuild --log
                 "
 
               package="$(find "$build_dir" -maxdepth 1 -type f \
