@@ -5,7 +5,7 @@ After=r11t-transport.service
 
 [Service]
 Type=simple
-ExecStart=/usr/lib/r11t/rmtfs -P -r -v
+ExecStart=/usr/lib/r11t/rmtfs -P -r
 Restart=on-failure
 RestartSec=1
 

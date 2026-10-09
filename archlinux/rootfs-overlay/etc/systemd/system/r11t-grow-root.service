@@ -2,12 +2,16 @@
 Description=Grow OPPO R11T Btrfs root to the userdata partition
 After=local-fs.target
 Before=r11t-hardware.target
-ConditionPathExists=!/var/lib/r11t-state/root-grown
 
 [Service]
 Type=oneshot
+# No ConditionPathExists marker.  The marker used to live in /var/lib/r11t-state,
+# which is deliberately on the `cache` partition so boot-image backups survive a
+# rootfs reflash -- which meant a reflash of userdata restored an 8 GiB btrfs
+# while the "already grown" flag stayed behind on cache, and systemd then skipped
+# this unit forever.  `btrfs filesystem resize max /` is idempotent and costs
+# milliseconds when the filesystem is already at full size, so it just runs.
 ExecStart=/usr/bin/btrfs filesystem resize max /
-ExecStart=/usr/bin/touch /var/lib/r11t-state/root-grown
 
 [Install]
 WantedBy=multi-user.target

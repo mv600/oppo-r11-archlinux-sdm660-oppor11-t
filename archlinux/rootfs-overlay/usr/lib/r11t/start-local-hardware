@@ -34,7 +34,7 @@ for module in \
 	drm_display_helper drm_dp_aux_bus panel-samsung-s6e3fa3 msm \
 	rmi_core rmi_i2c bq27xxx_battery bq27xxx_battery_i2c qcom-spmi-rradc \
 	qcom-spmi-vadc qcom-spmi-adc5 qcom_smbx oppo_vooc \
-	qcom_r11t_osm_cpufreq \
+	qcom_r11t_osm_cpufreq dryrun=0 apm=0 \
 	led-class-flash led-class-multicolor leds-qcom-lpg \
 	ledtrig-pattern leds-qcom-flash; do
 	# modprobe exits non-zero if the module is already loaded *with different

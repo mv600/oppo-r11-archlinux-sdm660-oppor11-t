@@ -49,7 +49,30 @@
 #   ip -br addr show wlan0                             <- what we got
 set -eu
 
-NV_DEV=${R11T_NV_DEV:-/dev/block/mmcblk0p1}
+# NV 分区的设备节点**必须探测，不能写死**。
+#
+# 2026-10-02 真机证据：
+#     /dev/block/          根本不存在
+#     /dev/mmcblk*         只有 mmcblk1，没有 mmcblk0
+#     ls /dev/block/mmcblk*  -> No such file or directory
+#
+# 也就是说写死的 /dev/block/mmcblk0p1 永远打不开，read_nv_wlan_mac 的
+# `[ -r "$dev" ]` 直接返回 1 -> snapshot 也是空 -> 走 else 分支无参
+# modprobe -> 固件随机 MAC。这就是「MAC 不是原厂值」的真因，和 modprobe
+# 时机（模块已加载导致 no-op）无关。
+#
+# 探测顺序：/dev/block/bootdevice/by-name（最稳）-> 两个候选节点 -> 默认值。
+# R11T_NV_DEV 仍然可以显式覆盖，方便对照实验。
+if [ -z "${R11T_NV_DEV:-}" ]; then
+	NV_DEV=
+	for _c in /dev/block/bootdevice/by-name/oppodycnvbk \
+	          /dev/mmcblk0p1 /dev/mmcblk1p1; do
+		[ -b "$_c" ] && { NV_DEV=$_c; break; }
+	done
+	: "${NV_DEV:=/dev/mmcblk0p1}"
+else
+	NV_DEV=$R11T_NV_DEV
+fi
 NV_SCAN_MIB=${R11T_NV_SCAN_MIB:-32}
 NV_SNAPSHOT=${R11T_NV_SNAPSHOT:-/var/lib/r11t/wlan-mac}
 
@@ -131,7 +154,7 @@ find_address_records() {
 #      an NV rewrite that moves the record or changes the address.
 # If both miss, the caller falls back to the snapshot file.
 read_nv_wlan_mac() {
-	local dev=$1 want_idx=${NV_WIFI_PREFIX_HEX:8:8}
+	local dev=${1:-$NV_DEV} want_idx=${NV_WIFI_PREFIX_HEX:8:8}
 	local off idx mac pad cand
 
 	[ -r "$dev" ] || { log "NV partition $dev is not readable"; return 1; }
