@@ -3,7 +3,7 @@
 # Derived from the official Arch Linux extra/kwin PKGBUILD (kwin 6.7.5-3).
 # Changes against upstream:
 #   * arch=(aarch64) - this package is built for the OPPO R11T port
-#   * pkgrel 3.1 so the locally patched build sorts above the repo package
+#   * pkgrel 3.2 so the locally patched build sorts above the repo package
 #   * the DRM atomic-commit EBUSY retry patch is applied in prepare()
 #   * libcap is a declared makedepends because package() calls setcap
 #
@@ -13,7 +13,7 @@
 pkgname=kwin
 pkgver=6.7.5
 _dirver=$(echo $pkgver | cut -d. -f1-3)
-pkgrel=3.1
+pkgrel=3.2
 pkgdesc='An easy to use, but flexible, Wayland compositor'
 arch=(aarch64)
 url='https://kde.org/plasma-desktop/'
@@ -92,12 +92,12 @@ makedepends=(extra-cmake-modules
 optdepends=('plasma-keyboard: virtual keyboard')
 groups=(plasma)
 source=(https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz
-        0001-kwin-drm-EBUSY-retry-with-saved-errno.patch)
+        0001-kwin-drm-EBUSY-retry-on-next-vblank.patch)
 sha256sums=('6baa910b732d93c48c90f9c1cc685cc93d0b8de0cdf138c24192c045bc3a48e2'
-            '7d56cee15f7e01f1426a7707da868b70c5ec81766cabc888a95278c2d5684fb0')
+            '119c870f6bfb97371f317d0cc11b69609e6def942a98bba166e5f0673285cad1')
 
 prepare() {
-  patch -d "$pkgname-$pkgver" -p1 -i "$srcdir/0001-kwin-drm-EBUSY-retry-with-saved-errno.patch"
+  patch -d "$pkgname-$pkgver" -p1 -i "$srcdir/0001-kwin-drm-EBUSY-retry-on-next-vblank.patch"
 }
 
 build() {

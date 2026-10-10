@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           package_dir="$GITHUB_WORKSPACE/archlinux/kwin-r11t"
           test -f "$package_dir/PKGBUILD"
-          test -f "$package_dir/0001-kwin-drm-EBUSY-retry-with-saved-errno.patch"
+          test -f "$package_dir/0001-kwin-drm-EBUSY-retry-on-next-vblank.patch"
           bash -n "$package_dir/PKGBUILD"
 
       - name: Verify patch against the released kwin sources
@@ -51,7 +51,7 @@ jobs:
             | sha256sum -c -
           tar xf kwin-6.7.5.tar.xz
           patch --dry-run -d kwin-6.7.5 -p1 \
-            -i "$package_dir/0001-kwin-drm-EBUSY-retry-with-saved-errno.patch"
+            -i "$package_dir/0001-kwin-drm-EBUSY-retry-on-next-vblank.patch"
 
       - name: Build package in Arch Linux ARM
         run: |
@@ -113,7 +113,7 @@ jobs:
           cat > INSTALL.md <<'EOF'
           # Install the R11T kwin package
 
-          This package is kwin 6.7.5-3.1 with the DRM atomic-commit EBUSY
+          This package is kwin 6.7.5-3.2 with the DRM atomic-commit EBUSY
           retry patch applied.  It replaces the distribution `kwin` package,
           so keep the old package file around as a rollback path.
 
@@ -124,7 +124,7 @@ jobs:
 
           2. Install the generated package:
 
-             sudo pacman -U kwin-6.7.5-3.1-aarch64.pkg.tar.zst
+             sudo pacman -U kwin-6.7.5-3.2-aarch64.pkg.tar.zst
 
           3. Log out of Plasma and restart the display manager so the new
              compositor binary is loaded:
@@ -135,9 +135,10 @@ jobs:
 
              journalctl _COMM=kwin_wayland -b | grep 'atomic commit failed'
 
-             The retry patch logs the saved errno and retries an EBUSY commit
-             up to three times, so repeated single-shot EBUSY failures should
-             no longer terminate the commit.
+             The retry patch keeps an EBUSY commit queued and retries it on
+             the next vblank for up to ten attempts.  Successful commits reset
+             the retry counter; after the limit, the existing collapse path
+             remains the fallback.
 
           5. Roll back if the desktop does not come up:
 

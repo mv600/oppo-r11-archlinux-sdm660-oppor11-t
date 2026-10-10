@@ -1,28 +1,49 @@
 --- a/src/backends/drm/drm_commit_thread.cpp
 +++ b/src/backends/drm/drm_commit_thread.cpp
-@@ -152,7 +152,9 @@
+@@ -147,12 +147,20 @@
+     return ret;
+ }
+ 
++// Number of vblanks the kernel is given to finish an in-flight commit before
++// the frame is dropped through the legacy failure path.
++static constexpr int s_maxEbusyRetries = 10;
++
+ void DrmCommitThread::submit()
+ {
      DrmAtomicCommit *commit = m_commits.front().get();
      const auto vrr = commit->isVrr();
      const bool success = commit->commit();
++    // Save errno before anything else can overwrite it, so the failure is
++    // attributed to the commit ioctl itself and not to the retry below.
 +    const int commitErrno = success ? 0 : errno;
      if (success) {
 +        m_ebusyRetries = 0;
          m_vrr = vrr.value_or(m_vrr);
          m_tearing = commit->isTearing();
          m_committed = std::move(m_commits.front());
-@@ -179,6 +181,11 @@
+@@ -179,6 +187,21 @@
          m_additionalSafetyMargin = std::clamp(m_additionalSafetyMargin, 0ns, maximumReasonableMargin);
          m_safetyMargin = m_baseSafetyMargin + m_additionalSafetyMargin;
      } else {
-+        if (commitErrno == EBUSY && m_ebusyRetries < 3) {
-+            ++m_ebusyRetries;
-+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-+            return;
++        if (commitErrno == EBUSY) {
++            // The kernel still has a commit in flight for one of the planes or
++            // CRTCs this update touches.  That is a transient condition, not a
++            // malformed commit: keep it queued and retry on the next vblank.
++            // Collapsing and dropping it loses the frame, which is what shows
++            // up as flicker while the screen is scrolling.
++            m_ebusyRetries++;
++            if (m_ebusyRetries <= s_maxEbusyRetries) {
++                const auto nextVblank = estimateNextVblank(std::chrono::steady_clock::now());
++                if (m_targetPageflipTime < nextVblank) {
++                    m_targetPageflipTime = nextVblank;
++                }
++                return;
++            }
 +        }
          if (m_commits.size() > 1) {
              // the failure may have been because of the reordering of commits
              // -> collapse all commits into one and try again with an already tested state
-@@ -196,7 +203,7 @@
+@@ -196,7 +219,7 @@
              m_commitsToDelete.push_back(std::move(commit));
          }
          m_commits.clear();
