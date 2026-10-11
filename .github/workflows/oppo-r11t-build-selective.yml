@@ -236,7 +236,10 @@ jobs:
           cd "$GITHUB_WORKSPACE/deploy/linux"
           J="${{ inputs.make_jobs }}"
           [ -z "$J" ] && J="$(nproc)"
-          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" modules
+          # Need vmlinux so that modules.builtin / modules.builtin.modinfo
+          # are generated; otherwise `make modules_install` fails with
+          # "No rule to make target 'modules.builtin'".
+          make O=build ARCH=$ARCH CROSS_COMPILE=$CROSS LOCALVERSION= -j"$J" vmlinux modules
         env:
           KBUILD_MODPOST_WARN: "1"
       - name: Install + archive modules
