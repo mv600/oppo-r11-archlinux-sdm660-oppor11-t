@@ -12,7 +12,7 @@ on:
         type: boolean
         default: false
       build_full_modules:
-        description: "生成完整 modules-r11t-gcc.tar.zst（全量 modules，耗时 ~50-90 分钟）"
+        description: "生成完整 modules-r11t-gcc.tar.zst（全量 modules，耗时 ~30 分钟）"
         type: boolean
         default: false
       make_jobs:
