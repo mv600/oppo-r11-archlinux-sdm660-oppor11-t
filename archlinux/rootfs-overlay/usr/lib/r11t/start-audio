@@ -1,7 +1,28 @@
 #!/bin/sh
 set -eu
 
-# Load everything that does not itself enable the ADSP-backed codec "mclk".
+# OPPO R11T 音频初始化。
+#
+# ★ 改动本脚本前必读（问题排查与修复记录.md §7）：
+#
+#   * 绝对不要用 /sys/bus/platform/drivers/<codec>/{unbind,bind} 去"强制重探"
+#     编解码器。声卡首次 snd_soc_bind_card() 一旦因为组件未就绪返回
+#     -EPROBE_DEFER，ASoC 会把声卡对象挂到 unbind_card_list
+#     （soc-core.c:2590）。此时手动 rebind codec 会走
+#     snd_soc_register_component → snd_soc_add_component → snd_soc_rebind_card，
+#     在一个已经被 soc_cleanup_card_resources() 拆过 / 从未绑定完的声卡上
+#     重新 bind，破坏 slab/memcg 记账 → Oops
+#     （Comm: start-audio, pc: __memcg_slab_post_alloc_hook,
+#      栈: snd_soc_dapm_new_widgets ← snd_soc_bind_card ← snd_soc_add_component
+#          ← devm_snd_soc_register_component ← msm8916_wcd_digital_probe
+#          ← platform_probe ← bind_store）。
+#     旧版脚本正是这么干的，于是几乎每次开机都在 start-audio 里 Oops；
+#     叠加当时的 panic_on_oops=1 + panic=10 就表现为"无 panic 的静默硬复位"。
+#   * 兜底只 rebind **机器驱动**（sdm660-int-sndcard/sound）。它的 devres 清理
+#     会走 snd_soc_unregister_card → snd_soc_unbind_card + list_del，把 defer
+#     中的声卡从 unbind_card_list 上干净摘除，然后全新 probe 一次。
+
+# 1. 先加载不会触发 ADSP mclk 的模块
 for module in \
 	qcom_q6v5_pas pinctrl-lpass-lpi pinctrl-sdm660-lpass-lpi \
 	soundcore snd snd-timer snd-pcm snd-compress snd-soc-core \
@@ -10,6 +31,7 @@ for module in \
 	modprobe "$module"
 done
 
+# 2. 等 ADSP remoteproc 注册并上电
 adsp=
 for retry in $(seq 1 600); do
 	for remoteproc in /sys/class/remoteproc/remoteproc*; do
@@ -24,13 +46,10 @@ done
 [ -n "$adsp" ] || { echo 'ADSP remoteproc did not register' >&2; exit 1; }
 [ "$(cat "$adsp/state")" != offline ] || echo start > "$adsp/state"
 
-# Wait (bounded) for the ADSP audio service (q6afe, APB service id 4) to be
-# registered by PDR *and* bound to its driver. The codec's "mclk" is one of that
-# provider's clocks; loading the codec before the service is live makes it
-# enable the clock too early, which the ADSP rejects with -EINVAL and which then
-# fails the probe for the whole boot (no sound card, no audio). Only once the
-# service is up do we load the codec and machine drivers. If the service never
-# appears we still try, so a wrong name guess cannot cost us audio entirely.
+# 3. 等 ADSP 音频服务（q6afe，APB service id 4）被 PDR 注册 *且* 绑定驱动。
+#    codec 的 mclk 是这个服务提供的时钟；服务没起来就加载 codec，会让它过早
+#    使能 mclk 而失败(-EINVAL)，整个 boot 都没声音。服务始终不出现也照常尝试，
+#    免得名字猜错就彻底没音频。
 svc_up=
 for retry in $(seq 1 600); do
 	for dev in /sys/bus/aprbus/devices/*; do
@@ -44,37 +63,75 @@ for retry in $(seq 1 600); do
 done
 [ -n "$svc_up" ] || echo 'ADSP audio service (q6afe) not up yet; loading codec anyway' >&2
 
+# 4. 加载 codec 驱动
 for module in \
 	snd-soc-msm8916-digital snd-soc-msm8916-analog \
-	snd-soc-ak4375 snd-soc-tfa989x snd-soc-sdm660-int; do
+	snd-soc-ak4375 snd-soc-tfa989x; do
 	modprobe "$module"
 done
 
-# If the codec probe still lost its race, force a fresh probe of the codec
-# platform device a few times (the ADSP service is by now definitely up).
-if ! grep -q 'OPPO R11T' /proc/asound/cards 2>/dev/null; then
-	codec_drv=/sys/bus/platform/drivers/msm8916-wcd-digital-codec
-	for attempt in $(seq 1 5); do
-		for dev in /sys/bus/platform/devices/*.audio-codec; do
-			[ -d "$dev" ] || continue
-			name=${dev##*/}
-			if [ -w "$codec_drv/unbind" ]; then
-				echo "$name" > "$codec_drv/unbind" 2>/dev/null || true
-			fi
-			sleep 1
-			if [ -w "$codec_drv/bind" ]; then
-				echo "$name" > "$codec_drv/bind" 2>/dev/null || true
-			fi
-		done
+# 5. 等 codec 器件全部绑定到各自驱动，再加载机器驱动。
+#    机器驱动的 snd_soc_bind_card() 要求所有组件已注册；否则就 -EPROBE_DEFER，
+#    声卡被挂到 unbind_card_list —— 这是我们最想避免的状态。
+for retry in $(seq 1 300); do
+	codecs_ok=1
+	# 平台型 codec（如 152c0000.audio-codec）
+	codec_total=0
+	codec_bound=0
+	for dev in /sys/bus/platform/devices/*.audio-codec; do
+		[ -d "$dev" ] || continue
+		codec_total=$((codec_total + 1))
+		[ -e "$dev/driver" ] && codec_bound=$((codec_bound + 1))
+	done
+	[ "$codec_total" -gt 0 ] || codecs_ok=
+	[ "$codec_total" = "$codec_bound" ] || codecs_ok=
+	# i2c 型 codec（ak4375 / tfa989x 功放）
+	for dev in /sys/bus/i2c/devices/*; do
+		[ -d "$dev" ] || continue
+		case "$(cat "$dev/name" 2>/dev/null || true)" in
+			*ak4375*|*tfa98*)
+				[ -e "$dev/driver" ] || codecs_ok=
+				;;
+		esac
+	done
+	[ -n "$codecs_ok" ] && break
+	sleep 0.1
+done
+
+modprobe snd-soc-sdm660-int
+
+# 6. 声卡就绪判定。
+#    注意：旧版用 grep -q 'OPPO R11T' /proc/asound/cards —— 声卡短名只有
+#    "R11T"，永远匹配不上，于是兜底逻辑每次开机都跑（这是 Oops 的直接入口）。
+card_up() {
+	grep -q 'R11T' /proc/asound/cards 2>/dev/null && return 0
+	for c in /sys/class/sound/card*; do
+		[ -r "$c/id" ] || continue
+		grep -q 'R11T' "$c/id" 2>/dev/null && return 0
+	done
+	return 1
+}
+
+# 7. 兜底：只 rebind 机器驱动（绝不碰 codec 设备）
+if ! card_up; then
+	sndcard_drv=/sys/bus/platform/drivers/sdm660-int-sndcard
+	for attempt in $(seq 1 3); do
+		if [ -w "$sndcard_drv/unbind" ]; then
+			echo sound > "$sndcard_drv/unbind" 2>/dev/null || true
+		fi
+		sleep 1
+		if [ -w "$sndcard_drv/bind" ]; then
+			echo sound > "$sndcard_drv/bind" 2>/dev/null || true
+		fi
 		for retry in $(seq 1 50); do
-			grep -q 'OPPO R11T' /proc/asound/cards 2>/dev/null && exit 0
+			card_up && exit 0
 			sleep 0.1
 		done
 	done
 fi
 
 for retry in $(seq 1 600); do
-	grep -q 'OPPO R11T' /proc/asound/cards 2>/dev/null && exit 0
+	card_up && exit 0
 	sleep 0.1
 done
 echo 'R11T ALSA card did not register' >&2
