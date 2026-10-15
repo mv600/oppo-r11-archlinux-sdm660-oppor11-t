@@ -47,6 +47,41 @@ mount -t btrfs -o rw,noatime,compress=zstd:3,space_cache=v2,subvol=@ \
 	"$ROOT_DEV" /newroot || emergency_shell "cannot mount $ROOT_DEV subvol=@"
 [ -x /newroot/sbin/init ] || emergency_shell '/sbin/init is missing'
 
+# ---------------------------------------------------------------------------
+# 尽早抢救上一 boot 的 pstore(ramoops) 记录。
+# ramoops 的 console 区是本 boot 内核一开始就往里写的小环形缓冲，等到用户态
+# 的 r11t-pstore-save.service 跑起来（约 67 秒）时上一 boot 的尾部早已被覆盖。
+# 这里在 switch_root 之前（约 1 秒）就把它拷到 rootfs 上，尽量保住上一 boot
+# 死亡前的最后输出。全部 best-effort：任何一步失败都不影响启动。
+# ---------------------------------------------------------------------------
+pstore_rescue() {
+	mkdir -p /sys/fs/pstore 2>/dev/null || true
+	# 已挂载时这条会失败，无副作用
+	mount -t pstore pstore /sys/fs/pstore 2>/dev/null || true
+	[ -d /sys/fs/pstore ] || return 0
+	ls -A /sys/fs/pstore 2>/dev/null | grep -q . || return 0
+
+	ts=$(date +%Y%m%d-%H%M%S 2>/dev/null) || ts=unknown
+	dir=/newroot/var/log/pstore/early-$ts
+	if [ -e "$dir" ]; then
+		dir=$dir-$$
+	fi
+	if mkdir -p "$dir" 2>/dev/null; then
+		cp -a /sys/fs/pstore/. "$dir"/ 2>/dev/null || true
+		sync 2>/dev/null || true
+		echo ">>> r11t: pstore rescued to $dir early in boot" > /dev/kmsg 2>/dev/null || true
+	fi
+
+	# 只保留最近 8 份 early-*
+	n=0
+	for d in $(ls -1dt /newroot/var/log/pstore/early-* 2>/dev/null); do
+		n=$((n + 1))
+		[ "$n" -gt 8 ] && rm -rf "$d" 2>/dev/null || true
+	done
+	return 0
+}
+pstore_rescue || true
+
 mkdir -p /newroot/dev /newroot/proc /newroot/sys
 mount --move /dev /newroot/dev
 mount --move /proc /newroot/proc
