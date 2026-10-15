@@ -26,6 +26,22 @@ jobs:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
 
+    env:
+      # Pin the builder image so the toolchain does not drift silently between
+      # runs.  Arch Linux ARM has no package archive (the only one, on
+      # tardis.tiny-vps.com, shut down on 2026-06-02), so the Qt/KF6 versions
+      # cannot be pinned to an exact number.  The image tag is the closest
+      # available approximation; EXPECTED_QT_SYMBOL below is what actually
+      # protects the phone.
+      BUILD_IMAGE: menci/archlinuxarm:base-devel-20261015.38692846456
+      # The R11T runs qt6-base 6.12.  KWin links Qt's private API, which is not
+      # stable across minor Qt releases: a binary built against a newer Qt dies
+      # on the device with
+      #   symbol lookup error: /usr/lib/libkwin.so.6: undefined symbol: ...
+      #   version Qt_6_PRIVATE_API
+      # so a mismatch must fail the build rather than ship a dead package.
+      EXPECTED_QT_SYMBOL: Qt_6.12
+
     steps:
       - name: Checkout deployment repository
         uses: actions/checkout@v4
@@ -59,9 +75,10 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/kwin-package"
           docker run --rm --privileged \
             --platform linux/arm64 \
+            --env EXPECTED_QT_SYMBOL="$EXPECTED_QT_SYMBOL" \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             --workdir /workspace \
-            menci/archlinuxarm:base-devel \
+            "$BUILD_IMAGE" \
             bash -euxo pipefail -c '
               pacman -Syu --noconfirm
 
@@ -100,6 +117,22 @@ jobs:
               pacman -Qlp "$package" | grep -F /usr/bin/kwin_wayland
               pacman -Qlp "$package" | grep -F /usr/lib/kwin
 
+              # Fail closed if the produced compositor targets a Qt the phone
+              # does not provide.  KWin links the Qt private API, which is not
+              # stable across minor Qt releases, so a mismatched binary cannot
+              # even start on the device.  Inspect the binary inside the package
+              # so the check covers exactly what will be installed.
+              rm -rf /tmp/qtcheck
+              mkdir -p /tmp/qtcheck
+              tar --zstd -xf "$package" -C /tmp/qtcheck usr/bin/kwin_wayland
+              built_qt="$(objdump -T /tmp/qtcheck/usr/bin/kwin_wayland \
+                | grep -oE "Qt_6\.[0-9]+" | sort -uV | tail -1)"
+              echo "built kwin_wayland requires $built_qt, phone has $EXPECTED_QT_SYMBOL"
+              if [ "$built_qt" != "$EXPECTED_QT_SYMBOL" ]; then
+                echo "::error::kwin_wayland targets $built_qt but the R11T has $EXPECTED_QT_SYMBOL; it would fail with a Qt_6_PRIVATE_API symbol lookup error. Pin BUILD_IMAGE to a date whose Qt matches the phone, or run pacman -Syu on the phone first."
+                exit 1
+              fi
+
               chmod 0644 "$output_dir"/*.pkg.tar.zst
               chmod 0777 "$output_dir"
             '
@@ -113,36 +146,36 @@ jobs:
           cat > INSTALL.md <<'EOF'
           # Install the R11T kwin package
 
-          This package is kwin 6.7.5-3.2 with the DRM atomic-commit EBUSY
-          retry patch applied.  It replaces the distribution `kwin` package,
-          so keep the old package file around as a rollback path.
+          This is kwin 6.7.5 with the DRM atomic-commit EBUSY retry patch
+          applied.  It replaces the distribution `kwin` package.
 
-          1. Keep a rollback copy of the currently installed package:
+          1. Install the generated package:
 
-             pacman -Q kwin
-             sudo cp /var/cache/pacman/pkg/kwin-*.pkg.tar.zst /root/
+             sudo pacman -U kwin-6.7.5-*-aarch64.pkg.tar.zst
 
-          2. Install the generated package:
-
-             sudo pacman -U kwin-6.7.5-3.2-aarch64.pkg.tar.zst
-
-          3. Log out of Plasma and restart the display manager so the new
-             compositor binary is loaded:
+          2. Restart the display manager so the new compositor is loaded:
 
              sudo systemctl restart sddm.service
 
-          4. Verify the patched behaviour in the user journal:
+          3. Verify the patched behaviour in the user journal:
 
-             journalctl _COMM=kwin_wayland -b | grep 'atomic commit failed'
+             journalctl --user-unit plasma-kwin_wayland.service -b | grep -c 'atomic commit failed'
 
-             The retry patch keeps an EBUSY commit queued and retries it on
-             the next vblank for up to ten attempts.  Successful commits reset
-             the retry counter; after the limit, the existing collapse path
-             remains the fallback.
+             The retry patch re-submits an EBUSY commit on the next vblank
+             until a 500 ms budget is spent, which comfortably exceeds the
+             ~49 ms the MSM commit worker needs to release the CRTC.  Once
+             the budget runs out the existing drop path remains the fallback.
 
-          5. Roll back if the desktop does not come up:
+          4. Roll back with the stock package from the ALARM repository:
 
-             sudo pacman -U /root/kwin-OLDVERSION.pkg.tar.zst
+             sudo pacman -Sy kwin
+
+          NOTE on Qt: pre-6.12 Qt builds of this package (kwin 6.7.5-3.1 and
+          6.7.5-3.2) cannot start once the phone's qt6-base is 6.12 or newer.
+          KWin links Qt's private API, which changed between Qt 6.11 and 6.12,
+          so such a binary dies with a `Qt_6_PRIVATE_API` symbol lookup error
+          and the screen stays on the kernel console.  Build against a Qt that
+          matches the phone; this workflow fails the build when they differ.
           EOF
 
       - name: Upload package artifact
