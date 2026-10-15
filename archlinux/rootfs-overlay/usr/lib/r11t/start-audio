@@ -1,13 +1,12 @@
 #!/bin/sh
 set -eu
 
+# Load everything that does not itself enable the ADSP-backed codec "mclk".
 for module in \
 	qcom_q6v5_pas pinctrl-lpass-lpi pinctrl-sdm660-lpass-lpi \
 	soundcore snd snd-timer snd-pcm snd-compress snd-soc-core \
 	snd-soc-qcom-common snd-q6dsp-common apr q6core q6afe \
-	q6afe-clocks q6afe-dai q6adm q6routing q6asm q6asm-dai \
-	snd-soc-msm8916-digital snd-soc-msm8916-analog \
-	snd-soc-ak4375 snd-soc-tfa989x snd-soc-sdm660-int; do
+	q6afe-clocks q6afe-dai q6adm q6routing q6asm q6asm-dai; do
 	modprobe "$module"
 done
 
@@ -24,6 +23,55 @@ for retry in $(seq 1 600); do
 done
 [ -n "$adsp" ] || { echo 'ADSP remoteproc did not register' >&2; exit 1; }
 [ "$(cat "$adsp/state")" != offline ] || echo start > "$adsp/state"
+
+# Wait (bounded) for the ADSP audio service (q6afe, APB service id 4) to be
+# registered by PDR *and* bound to its driver. The codec's "mclk" is one of that
+# provider's clocks; loading the codec before the service is live makes it
+# enable the clock too early, which the ADSP rejects with -EINVAL and which then
+# fails the probe for the whole boot (no sound card, no audio). Only once the
+# service is up do we load the codec and machine drivers. If the service never
+# appears we still try, so a wrong name guess cannot cost us audio entirely.
+svc_up=
+for retry in $(seq 1 600); do
+	for dev in /sys/bus/aprbus/devices/*; do
+		[ -e "$dev/driver" ] || continue
+		case "${dev##*/}" in
+			aprsvc:service:*:4) svc_up=1 ;;
+		esac
+	done
+	[ -n "$svc_up" ] && break
+	sleep 0.1
+done
+[ -n "$svc_up" ] || echo 'ADSP audio service (q6afe) not up yet; loading codec anyway' >&2
+
+for module in \
+	snd-soc-msm8916-digital snd-soc-msm8916-analog \
+	snd-soc-ak4375 snd-soc-tfa989x snd-soc-sdm660-int; do
+	modprobe "$module"
+done
+
+# If the codec probe still lost its race, force a fresh probe of the codec
+# platform device a few times (the ADSP service is by now definitely up).
+if ! grep -q 'OPPO R11T' /proc/asound/cards 2>/dev/null; then
+	codec_drv=/sys/bus/platform/drivers/msm8916-wcd-digital-codec
+	for attempt in $(seq 1 5); do
+		for dev in /sys/bus/platform/devices/*.audio-codec; do
+			[ -d "$dev" ] || continue
+			name=${dev##*/}
+			if [ -w "$codec_drv/unbind" ]; then
+				echo "$name" > "$codec_drv/unbind" 2>/dev/null || true
+			fi
+			sleep 1
+			if [ -w "$codec_drv/bind" ]; then
+				echo "$name" > "$codec_drv/bind" 2>/dev/null || true
+			fi
+		done
+		for retry in $(seq 1 50); do
+			grep -q 'OPPO R11T' /proc/asound/cards 2>/dev/null && exit 0
+			sleep 0.1
+		done
+	done
+fi
 
 for retry in $(seq 1 600); do
 	grep -q 'OPPO R11T' /proc/asound/cards 2>/dev/null && exit 0
