@@ -23,6 +23,10 @@ on:
         description: "帧缓冲字体（如 SUN12x22、SUN8x16 等，影响开机 logo/console 字体大小）"
         type: string
         default: "SUN12x22"
+      cmdline_extra:
+        description: "附加内核 cmdline（诊断用，追加在原 cmdline 之后；例：loglevel=8 panic=0 initcall_debug。留空=原样）"
+        type: string
+        default: ""
 
 env:
   ARCH: arm64
@@ -177,13 +181,15 @@ jobs:
           if [ -n "${{ inputs.fb_font }}" ]; then
             FB_FONT="${{ inputs.fb_font }}"
           fi
+          CMDLINE_EXTRA="${{ inputs.cmdline_extra }}"
+          echo "cmdline_extra = [$CMDLINE_EXTRA]"
           ./mkbootimg --kernel "$GITHUB_WORKSPACE/deploy/linux/build/Image.gz-dtb" \
             --ramdisk "$GITHUB_WORKSPACE/deploy/linux/build/r11t-arch-initramfs.cpio.gz" \
             --pagesize 4096 --base 0x80000000 \
             --kernel_offset 0x00008000 --ramdisk_offset 0x03000000 \
             --second_offset 0x00f00000 --tags_offset 0x00000100 \
             --header_version 1 --os_version 9.0.0 --os_patch_level 2019-09 \
-            --cmdline "console=tty0 console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=4 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init fbcon=font:${FB_FONT}" \
+            --cmdline "console=tty0 console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=4 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init fbcon=font:${FB_FONT} ${CMDLINE_EXTRA}" \
             -o "$GITHUB_WORKSPACE/boot-r11t-arch.img"
       - name: Verify boot header + size
         run: |
