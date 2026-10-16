@@ -12,9 +12,9 @@ tools, and the shared diagnostics required by the image builders.
 
 Related source repositories:
 
-- Kernel: <https://github.com/HELPMEEADICE/linux-sdm660-oppor11-t>
-- RMTFS: <https://github.com/HELPMEEADICE/rmtfs-sdm660-oppor11-t>
-- General tools: <https://github.com/HELPMEEADICE/oppo-r11-mainline-tools-sdm660-oppor11-t>
+- Kernel: <https://github.com/mv600/linux-sdm660-oppor11-t>
+- RMTFS: <https://github.com/CPH1707-Mainline/rmtfs-sdm660-oppor11-t>
+- General tools: <https://github.com/CPH1707-Mainline/oppo-r11-mainline-tools-sdm660-oppor11-t>
 
 The build scripts expect the kernel checkout at `./linux`. This public source
 repository intentionally excludes device firmware, partition backups,
