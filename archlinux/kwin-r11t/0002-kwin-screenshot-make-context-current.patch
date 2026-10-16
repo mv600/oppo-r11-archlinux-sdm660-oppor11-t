@@ -1,0 +1,125 @@
+kwin 6.7.5: make the screenshot target's OpenGL context current before painting
+
+Backport of the upstream fix for the kwin_wayland crash that happens whenever a
+QML based effect (e.g. showfps) is loaded and any ScreenShot2, Spectacle or
+xdg-desktop-portal capture is made.
+
+WorkspaceScene::prePaint() calls effects->prePaintScreen().  A QML effect that
+paints an OffscreenQuickScene for the (new) ScreenShot render view constructs an
+OffscreenQuickView there; its constructor makes its own QOpenGLContext current
+and then calls doneCurrent(), which sets KWin's process wide
+EglContext::s_currentContext to nullptr.  The screenshot path then painted into
+the screenshot framebuffer without making a context current again, so
+GLFramebuffer::pushFramebuffer() dereferenced the null current context and
+kwin_wayland died with SIGSEGV in EglContext::currentFramebuffer().
+
+Upstream fixed this in two steps that this patch backports:
+
+  * ScreenshotLayer::doBeginFrame() now makes the target framebuffer's context
+    current (GLFramebuffer::context() is the new accessor it needs), and
+  * both SceneView based ScreenShotManager::takeScreenShot() overloads call
+    layer.beginFrame() *after* sceneView.prePaint(), so that the makeCurrent()
+    happens after the effects had their chance to switch the context.
+
+The DRM backend never had this problem because EglGbmLayerSurface::startRendering()
+already makes the compositor's context current before every composite.
+
+diff --git a/src/opengl/glframebuffer.h b/src/opengl/glframebuffer.h
+index 8651eb4..71a1f81 100644
+--- a/src/opengl/glframebuffer.h
++++ b/src/opengl/glframebuffer.h
+@@ -83,6 +83,14 @@ public:
+         return m_valid;
+     }
+ 
++    /**
++     * Returns the OpenGL context this framebuffer object belongs to.
++     */
++    EglContext *context() const
++    {
++        return m_context;
++    }
++
+     /**
+      * Returns the last bound framebuffer, or @c null if no framebuffer is current.
+      */
+diff --git a/src/plugins/screenshot/screenshot.cpp b/src/plugins/screenshot/screenshot.cpp
+index c817805..c50a91b 100644
+--- a/src/plugins/screenshot/screenshot.cpp
++++ b/src/plugins/screenshot/screenshot.cpp
+@@ -116,10 +116,6 @@ std::optional<QImage> ScreenShotManager::takeScreenShot(LogicalOutput *screen, S
+     if (!layer.preparePresentationTest()) {
+         return std::nullopt;
+     }
+-    const auto beginInfo = layer.beginFrame();
+-    if (!beginInfo) {
+-        return std::nullopt;
+-    }
+     SceneView sceneView(kwinApp()->scene(), screen, nullptr, &layer);
+     std::unique_ptr<ItemTreeView> cursorView;
+     if (!(flags & ScreenShotIncludeCursor)) {
+@@ -133,6 +129,12 @@ std::optional<QImage> ScreenShotManager::takeScreenShot(LogicalOutput *screen, S
+     sceneView.setViewport(screen->geometryF());
+     sceneView.setScale(scale);
+     sceneView.prePaint();
++    // prePaint() runs the effects' prePaintScreen, which may leave another OpenGL
++    // context current, so the context is made current again in beginFrame()
++    const auto beginInfo = layer.beginFrame();
++    if (!beginInfo) {
++        return std::nullopt;
++    }
+     sceneView.paint(beginInfo->renderTarget, QPoint(), fullDamage);
+     sceneView.postPaint();
+     if (!layer.endFrame(fullDamage, fullDamage, nullptr)) {
+@@ -184,10 +186,6 @@ std::optional<QImage> ScreenShotManager::takeScreenShot(const Rect &area, Screen
+     if (!layer.preparePresentationTest()) {
+         return std::nullopt;
+     }
+-    const auto beginInfo = layer.beginFrame();
+-    if (!beginInfo) {
+-        return std::nullopt;
+-    }
+     SceneView sceneView(kwinApp()->scene(), workspace()->outputs().front(), nullptr, &layer);
+     std::unique_ptr<ItemTreeView> cursorView;
+     if (!(flags & ScreenShotIncludeCursor)) {
+@@ -201,6 +199,12 @@ std::optional<QImage> ScreenShotManager::takeScreenShot(const Rect &area, Screen
+     sceneView.setViewport(area);
+     sceneView.setScale(scale);
+     sceneView.prePaint();
++    // prePaint() runs the effects' prePaintScreen, which may leave another OpenGL
++    // context current, so the context is made current again in beginFrame()
++    const auto beginInfo = layer.beginFrame();
++    if (!beginInfo) {
++        return std::nullopt;
++    }
+     sceneView.paint(beginInfo->renderTarget, QPoint(), fullDamage);
+     sceneView.postPaint();
+     if (!layer.endFrame(fullDamage, fullDamage, nullptr)) {
+diff --git a/src/plugins/screenshot/screenshotlayer.cpp b/src/plugins/screenshot/screenshotlayer.cpp
+index 1f0cc35..7e239d4 100644
+--- a/src/plugins/screenshot/screenshotlayer.cpp
++++ b/src/plugins/screenshot/screenshotlayer.cpp
+@@ -4,6 +4,8 @@
+     SPDX-License-Identifier: GPL-2.0-or-later
+ */
+ #include "screenshotlayer.h"
++#include "opengl/eglcontext.h"
++#include "opengl/glframebuffer.h"
+ 
+ namespace KWin
+ {
+@@ -26,6 +28,14 @@ FormatModifierMap ScreenshotLayer::supportedDrmFormats() const
+ 
+ std::optional<OutputLayerBeginFrameInfo> ScreenshotLayer::doBeginFrame()
+ {
++    // effects that run during the scene's prePaint can switch the current OpenGL
++    // context (in particular QML based effects like showfps, whose offscreen
++    // quick scene makes its own context current and then calls doneCurrent),
++    // so the context has to be made current again before rendering into the target
++    if (!m_buffer->context()->makeCurrent()) {
++        return std::nullopt;
++    }
++
+     return OutputLayerBeginFrameInfo{
+         .renderTarget = RenderTarget(m_buffer),
+         .repaint = Region::infinite(),
