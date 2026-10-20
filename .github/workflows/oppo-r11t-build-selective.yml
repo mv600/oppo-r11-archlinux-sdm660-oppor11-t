@@ -183,13 +183,24 @@ jobs:
           fi
           CMDLINE_EXTRA="${{ inputs.cmdline_extra }}"
           echo "cmdline_extra = [$CMDLINE_EXTRA]"
+          # loglevel=7: keep full boot/forensic visibility (see
+          #   问题排查与修复记录.md §21.12.13).
+          # No console=tty0: tty0 is fbcon bound to msmdrmfb (the DPU).  printk
+          #   iterates consoles under console_lock in registration order, so a
+          #   wedged DPU blocks fbcon's write while the lock is held -> every CPU
+          #   spins on console_lock (whole system freezes) and the ramoops
+          #   console, which is registered after tty0, never gets the last
+          #   messages (pstore always empty).  Dropping console=tty0 routes
+          #   printk straight to ttyMSM0 + ramoops, so a display-side hang can no
+          #   longer take the whole machine down nor blind the forensics
+          #   (see 问题排查与修复记录.md §21.12.17).
           ./mkbootimg --kernel "$GITHUB_WORKSPACE/deploy/linux/build/Image.gz-dtb" \
             --ramdisk "$GITHUB_WORKSPACE/deploy/linux/build/r11t-arch-initramfs.cpio.gz" \
             --pagesize 4096 --base 0x80000000 \
             --kernel_offset 0x00008000 --ramdisk_offset 0x03000000 \
             --second_offset 0x00f00000 --tags_offset 0x00000100 \
             --header_version 1 --os_version 9.0.0 --os_patch_level 2019-09 \
-            --cmdline "console=tty0 console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=4 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init fbcon=font:${FB_FONT} ${CMDLINE_EXTRA}" \
+            --cmdline "console=ttyMSM0,115200n8 earlycon=msm_serial_dm,0xc170000 loglevel=7 panic=10 root=PARTLABEL=userdata rootfstype=btrfs rootflags=subvol=@,compress=zstd:3,noatime,space_cache=v2 rootwait rw rdinit=/init fbcon=font:${FB_FONT} ${CMDLINE_EXTRA}" \
             -o "$GITHUB_WORKSPACE/boot-r11t-arch.img"
       - name: Verify boot header + size
         run: |
