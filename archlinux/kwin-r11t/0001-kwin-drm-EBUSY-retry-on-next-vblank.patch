@@ -1,54 +1,33 @@
 --- a/src/backends/drm/drm_commit_thread.cpp
 +++ b/src/backends/drm/drm_commit_thread.cpp
-@@ -76,9 +76,12 @@
+@@ -76,7 +76,9 @@
                  continue;
              }
              const auto now = std::chrono::steady_clock::now();
--            if (m_targetPageflipTime > now + m_safetyMargin) {
-+            // a commit that the kernel rejected with EBUSY must not be retried before
-+            // the commit it collided with has had a chance to finish
-+            const auto wakeUp = std::max(m_targetPageflipTime, m_ebusyRetryNotBefore);
-+            if (wakeUp > now + m_safetyMargin) {
+-            const auto wakeupTime = m_targetPageflipTime - m_safetyMargin;
++            // an EBUSY-rejected commit must not be retried before the
++            // commit it collided with has had a chance to finish
++            const auto wakeupTime = std::max(m_targetPageflipTime, m_ebusyRetryNotBefore) - m_safetyMargin;
+             if (wakeupTime > now) {
                  lock.unlock();
--                std::this_thread::sleep_until(m_targetPageflipTime - m_safetyMargin);
-+                std::this_thread::sleep_until(wakeUp - m_safetyMargin);
-                 lock.lock();
-                 // the main thread might've modified the list
-                 if (m_commits.empty()) {
-@@ -131,6 +134,11 @@
-                     continue;
-                 }
-             }
-+            if (m_ebusyRetryNotBefore > std::chrono::steady_clock::now() + m_safetyMargin) {
-+                // an earlier attempt was rejected with EBUSY and the commit it
-+                // collided with is still in flight; go back to the wait above
-+                continue;
-+            }
-             submit();
-         }
-     }));
-@@ -147,12 +155,30 @@
+                 std::this_thread::sleep_until(wakeupTime);
+@@ -148,12 +150,25 @@
      return ret;
  }
  
-+// A frame that the kernel rejected with EBUSY is retried until it is this old, at
-+// which point it is dropped. The kernel refuses non-blocking commits while an
-+// earlier commit touching one of the same planes or CRTCs is still in flight, and
-+// the driver may only finish the tail of that commit more than a vblank after the
-+// pageflip. Retrying earlier than one full vblank is therefore pointless, and a
-+// single retry is not enough - without a grace period of multiple vblanks, every
-+// frame that happens to be submitted while the previous commit's worker is still
-+// running gets dropped, which leaves stale content on screen.
++// An EBUSY-rejected frame is retried until it is this old, at which
++// point it is dropped. The kernel refuses non-blocking commits while an
++// earlier commit touching one of the same planes or CRTCs is still in
++// flight, and the MSM commit worker can finish that tail more than a
++// vblank after the pageflip. Retrying sooner than one vblank is
++// therefore pointless.
 +static constexpr auto s_maxEbusyRetryTime = std::chrono::milliseconds(500);
 +
  void DrmCommitThread::submit()
  {
      DrmAtomicCommit *commit = m_commits.front().get();
      const auto vrr = commit->isVrr();
-     const bool success = commit->commit();
-+    // save errno right away, so that the failure is attributed to the commit
-+    // ioctl itself and not to anything else that may set errno below
-+    const int commitErrno = success ? 0 : errno;
+     const auto success = commit->commit();
      if (success) {
 +        if (m_ebusyRetries > 0) {
 +            qCDebug(KWIN_DRM) << "atomic commit succeeded after" << m_ebusyRetries << "EBUSY retries";
@@ -58,21 +37,22 @@
          m_vrr = vrr.value_or(m_vrr);
          m_tearing = commit->isTearing();
          m_committed = std::move(m_commits.front());
-@@ -179,6 +205,28 @@
+@@ -180,6 +195,29 @@
          m_additionalSafetyMargin = std::clamp(m_additionalSafetyMargin, 0ns, maximumReasonableMargin);
          m_safetyMargin = m_baseSafetyMargin + m_additionalSafetyMargin;
      } else {
-+        if (commitErrno == EBUSY) {
++        if (success.error().code == OutputErrorCode::InvalidApiUsage
++            && success.error().message == QStringLiteral("EBUSY")) {
 +            const auto now = std::chrono::steady_clock::now();
 +            if (m_ebusyRetries == 0) {
 +                m_ebusySince = now;
 +            }
 +            if (now - m_ebusySince < s_maxEbusyRetryTime) {
 +                m_ebusyRetries++;
-+                // the commit this one collided with either has its pageflip one
-+                // vblank away, or is still in the driver's commit worker, which
-+                // can lag the pageflip by more than a vblank; retrying any sooner
-+                // than one vblank from now would just fail for the same reason
++                // The commit this one collided with either has its pageflip
++                // one vblank away, or is still in the driver's commit worker.
++                // Retrying any sooner than one vblank from now would just fail
++                // for the same reason.
 +                m_ebusyRetryNotBefore = now + m_minVblankInterval + m_safetyMargin;
 +                m_targetPageflipTime = std::max(m_targetPageflipTime, m_ebusyRetryNotBefore);
 +                qCDebug(KWIN_DRM) << "atomic commit rejected with EBUSY, retrying" << m_ebusyRetries << "time(s)";
@@ -87,18 +67,9 @@
          if (m_commits.size() > 1) {
              // the failure may have been because of the reordering of commits
              // -> collapse all commits into one and try again with an already tested state
-@@ -196,7 +244,7 @@
-             m_commitsToDelete.push_back(std::move(commit));
-         }
-         m_commits.clear();
--        qCWarning(KWIN_DRM) << "atomic commit failed:" << strerror(errno);
-+        qCWarning(KWIN_DRM) << "atomic commit failed:" << strerror(commitErrno);
-     }
-     QMetaObject::invokeMethod(this, &DrmCommitThread::clearDroppedCommits, Qt::ConnectionType::QueuedConnection);
- }
 --- a/src/backends/drm/drm_commit_thread.h
 +++ b/src/backends/drm/drm_commit_thread.h
-@@ -61,6 +61,13 @@
+@@ -62,6 +62,13 @@
      TimePoint m_lastPageflip;
      TimePoint m_targetPageflipTime;
      TimePoint m_lastCommitTime;

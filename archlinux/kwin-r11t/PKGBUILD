@@ -1,20 +1,20 @@
 # Maintainer: R11T Arch Linux port <lmv600vm@gmail.com>
 #
-# Derived from the official Arch Linux extra/kwin PKGBUILD (kwin 6.7.5-3).
+# Derived from the official Arch Linux extra/kwin PKGBUILD (kwin 6.8.0-1).
 # Changes against upstream:
 #   * arch=(aarch64) - this package is built for the OPPO R11T port
-#   * pkgrel 3.4 so the locally patched build sorts above the repo package
+#   * pkgrel 1.1 so the locally patched build sorts above the repo package
 #   * the DRM atomic-commit EBUSY retry patch is applied in prepare()
-#   * the screenshot OpenGL context fix (upstream backport) is applied in prepare()
-#   * libcap is a declared makedepends because package() calls setcap
+#   * the QPA logical DPI is derived from the physical panel geometry in prepare()
+#   * libcap is declared explicitly because KWin's install step runs setcap
 #
 # The KWin source tarball is architecture independent, so the upstream
 # sha256 and build flags are kept unchanged.
 
 pkgname=kwin
-pkgver=6.7.5
+pkgver=6.8.0
 _dirver=$(echo $pkgver | cut -d. -f1-3)
-pkgrel=3.4
+pkgrel=1.1
 pkgdesc='An easy to use, but flexible, Wayland compositor'
 arch=(aarch64)
 url='https://kde.org/plasma-desktop/'
@@ -45,6 +45,7 @@ depends=(aurorae
          knotifications
          kpackage
          kquickcharts
+         krunner
          kscreenlocker
          kservice
          ksvg
@@ -94,24 +95,26 @@ optdepends=('plasma-keyboard: virtual keyboard')
 groups=(plasma)
 source=(https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz
         0001-kwin-drm-EBUSY-retry-on-next-vblank.patch
-        0002-kwin-screenshot-make-context-current.patch)
-sha256sums=('6baa910b732d93c48c90f9c1cc685cc93d0b8de0cdf138c24192c045bc3a48e2'
-            'a8bf38d0197b6389631cf6c422ead8dec1175e0c39f3bdcc525fa8f84fa9df6d'
-            '0865d817f3ce11957e4f5cdbd2b31aa3470189750dcb98d12fc3695e028fd6cc')
+        0003-kwin-qpa-use-panel-physical-dpi.patch)
+sha256sums=('4bfaf31e29a8f9fdf231dc3bbb9b09b0ce07cae9fee7a01cfc86425ece796258'
+            'b7f7fbd87fda9524ef247f1f244541670cd2a092937e89855dafc85c2ad0dc09'
+            '2d19e328ca7c54bc2c66da26195bef9ab16e60d2e297a4d68f94da0d1c2b1111')
 
 prepare() {
   patch -d "$pkgname-$pkgver" -p1 -i "$srcdir/0001-kwin-drm-EBUSY-retry-on-next-vblank.patch"
-  patch -d "$pkgname-$pkgver" -p1 -i "$srcdir/0002-kwin-screenshot-make-context-current.patch"
+  patch -d "$pkgname-$pkgver" -p1 -i "$srcdir/0003-kwin-qpa-use-panel-physical-dpi.patch"
 }
 
 build() {
   cmake -B build -S "$pkgname-$pkgver" \
-    -DCMAKE_INSTALL_LIBEXECDIR=lib \
+    -DKDE_INSTALL_LIBEXECDIR=lib \
     -DBUILD_TESTING=OFF
   cmake --build build
 }
 
 package() {
   DESTDIR="$pkgdir" cmake --install build
+  # Arch packaging can drop xattrs written by the CMake install script. Set the
+  # capability again on the staged binary so the r11 package is self-contained.
   setcap CAP_SYS_NICE=+ep "$pkgdir"/usr/bin/kwin_wayland
 }

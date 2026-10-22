@@ -41,6 +41,10 @@ jobs:
       #   version Qt_6_PRIVATE_API
       # so a mismatch must fail the build rather than ship a dead package.
       EXPECTED_QT_SYMBOL: Qt_6.12
+      KWIN_VERSION: 6.8.0
+      KWIN_TARBALL_SHA256: 4bfaf31e29a8f9fdf231dc3bbb9b09b0ce07cae9fee7a01cfc86425ece796258
+      EBUSY_PATCH_SHA256: b7f7fbd87fda9524ef247f1f244541670cd2a092937e89855dafc85c2ad0dc09
+      DPI_PATCH_SHA256: 2d19e328ca7c54bc2c66da26195bef9ab16e60d2e297a4d68f94da0d1c2b1111
 
     steps:
       - name: Checkout deployment repository
@@ -52,7 +56,11 @@ jobs:
           package_dir="$GITHUB_WORKSPACE/archlinux/kwin-r11t"
           test -f "$package_dir/PKGBUILD"
           test -f "$package_dir/0001-kwin-drm-EBUSY-retry-on-next-vblank.patch"
+          test -f "$package_dir/0003-kwin-qpa-use-panel-physical-dpi.patch"
           bash -n "$package_dir/PKGBUILD"
+          grep -F "pkgver=$KWIN_VERSION" "$package_dir/PKGBUILD"
+          grep -F "$EBUSY_PATCH_SHA256" "$package_dir/PKGBUILD"
+          grep -F "$DPI_PATCH_SHA256" "$package_dir/PKGBUILD"
 
       - name: Verify patch against the released kwin sources
         run: |
@@ -62,12 +70,13 @@ jobs:
           rm -rf "$work"
           mkdir -p "$work"
           cd "$work"
-          curl -fsSLO "https://download.kde.org/stable/plasma/6.7.5/kwin-6.7.5.tar.xz"
-          echo "6baa910b732d93c48c90f9c1cc685cc93d0b8de0cdf138c24192c045bc3a48e2  kwin-6.7.5.tar.xz" \
-            | sha256sum -c -
-          tar xf kwin-6.7.5.tar.xz
-          patch --dry-run -d kwin-6.7.5 -p1 \
+          curl -fsSLO "https://download.kde.org/stable/plasma/$KWIN_VERSION/kwin-$KWIN_VERSION.tar.xz"
+          echo "$KWIN_TARBALL_SHA256  kwin-$KWIN_VERSION.tar.xz" | sha256sum -c -
+          tar xf "kwin-$KWIN_VERSION.tar.xz"
+          patch -d "kwin-$KWIN_VERSION" -p1 \
             -i "$package_dir/0001-kwin-drm-EBUSY-retry-on-next-vblank.patch"
+          patch -d "kwin-$KWIN_VERSION" -p1 \
+            -i "$package_dir/0003-kwin-qpa-use-panel-physical-dpi.patch"
 
       - name: Build package in Arch Linux ARM
         run: |
@@ -76,12 +85,11 @@ jobs:
           docker run --rm --privileged \
             --platform linux/arm64 \
             --env EXPECTED_QT_SYMBOL="$EXPECTED_QT_SYMBOL" \
+            --env KWIN_VERSION="$KWIN_VERSION" \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             --workdir /workspace \
             "$BUILD_IMAGE" \
             bash -euxo pipefail -c '
-              pacman -Syu --noconfirm
-
               package_dir=/workspace/archlinux/kwin-r11t
               output_dir=/workspace/kwin-package
               build_dir=/build/kwin
@@ -108,6 +116,15 @@ jobs:
                   makepkg --syncdeps --noconfirm --cleanbuild --log
                 "
 
+              # Fail closed if the R11T panel DPI patch did not make it into
+              # the source tree.  The patch keeps native 1080x1920 scanout and
+              # changes only Qt's logical DPI, derived from 68x122 mm.
+              screen_cpp="$build_dir/kwin-$KWIN_VERSION/src/plugins/qpa/screen.cpp"
+              grep -F "const QSize physicalSize = output->physicalSize();" \
+                "$screen_cpp"
+              grep -A2 -F "QDpi Screen::logicalDpi() const" "$screen_cpp" \
+                | grep -F "return outputDpi(m_output);"
+
               ls -la "$output_dir"
 
               package="$(find "$output_dir" -maxdepth 1 -type f \
@@ -124,7 +141,7 @@ jobs:
               # so the check covers exactly what will be installed.
               rm -rf /tmp/qtcheck
               mkdir -p /tmp/qtcheck
-              tar --zstd -xf "$package" -C /tmp/qtcheck usr/bin/kwin_wayland
+              tar --zstd --xattrs -xf "$package" -C /tmp/qtcheck usr/bin/kwin_wayland
               built_qt="$(objdump -T /tmp/qtcheck/usr/bin/kwin_wayland \
                 | grep -oE "Qt_6\.[0-9]+" | sort -uV | tail -1)"
               echo "built kwin_wayland requires $built_qt, phone has $EXPECTED_QT_SYMBOL"
@@ -132,6 +149,18 @@ jobs:
                 echo "::error::kwin_wayland targets $built_qt but the R11T has $EXPECTED_QT_SYMBOL; it would fail with a Qt_6_PRIVATE_API symbol lookup error. Pin BUILD_IMAGE to a date whose Qt matches the phone, or run pacman -Syu on the phone first."
                 exit 1
               fi
+
+              # The file capability is part of the deliverable: without it the
+              # realtime scheduling request fails at runtime on the R11T.
+              built_caps="$(getcap /tmp/qtcheck/usr/bin/kwin_wayland)"
+              echo "built kwin_wayland capabilities: $built_caps"
+              case "$built_caps" in
+                *cap_sys_nice=ep*) ;;
+                *)
+                  echo "::error::kwin_wayland is missing cap_sys_nice=ep in the package"
+                  exit 1
+                  ;;
+              esac
 
               chmod 0644 "$output_dir"/*.pkg.tar.zst
               chmod 0777 "$output_dir"
@@ -146,12 +175,13 @@ jobs:
           cat > INSTALL.md <<'EOF'
           # Install the R11T kwin package
 
-          This is kwin 6.7.5 with the DRM atomic-commit EBUSY retry patch
-          applied.  It replaces the distribution `kwin` package.
+          This is kwin 6.8.0 with the DRM atomic-commit EBUSY retry patch
+          and the R11T native-pixel DPI fix applied. It replaces the
+          distribution `kwin` package.
 
           1. Install the generated package:
 
-             sudo pacman -U kwin-6.7.5-*-aarch64.pkg.tar.zst
+             sudo pacman -U kwin-6.8.0-*-aarch64.pkg.tar.zst
 
           2. Restart the display manager so the new compositor is loaded:
 
@@ -166,12 +196,22 @@ jobs:
              ~49 ms the MSM commit worker needs to release the CRTC.  Once
              the budget runs out the existing drop path remains the fallback.
 
-          4. Roll back with the stock package from the ALARM repository:
+          4. Verify the R11T panel DPI patch is active:
+
+             kscreen-doctor -o
+
+          The output must stay at native 1080x1920 with Scale 1.  KWin's
+          Qt logical DPI is derived from the panel's 68x122 mm geometry
+          (about 401 DPI), so fonts and controls are physically sized
+          without resampling the framebuffer.
+
+          5. Roll back with the stock package from the ALARM repository:
 
              sudo pacman -Sy kwin
 
-          NOTE on Qt: pre-6.12 Qt builds of this package (kwin 6.7.5-3.1 and
-          6.7.5-3.2) cannot start once the phone's qt6-base is 6.12 or newer.
+          NOTE on Qt: builds of this package must target the phone's Qt 6.12
+          private ABI. Older Qt builds cannot start once the phone's
+          qt6-base is 6.12 or newer.
           KWin links Qt's private API, which changed between Qt 6.11 and 6.12,
           so such a binary dies with a `Qt_6_PRIVATE_API` symbol lookup error
           and the screen stays on the kernel console.  Build against a Qt that

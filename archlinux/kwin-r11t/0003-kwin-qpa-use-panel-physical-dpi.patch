@@ -1,0 +1,54 @@
+--- a/src/plugins/qpa/screen.cpp
++++ b/src/plugins/qpa/screen.cpp
+@@ -14,6 +14,8 @@
+ 
+ #include <qpa/qwindowsysteminterface.h>
+ 
++#include <cmath>
++
+ namespace KWin
+ {
+ namespace QPA
+@@ -24,6 +26,32 @@
+     return qEnvironmentVariableIsSet("QT_WAYLAND_FORCE_DPI") ? qEnvironmentVariableIntValue("QT_WAYLAND_FORCE_DPI") : -1;
+ }
+ 
++static QDpi outputDpi(const LogicalOutput *output)
++{
++    const int dpi = forcedDpi();
++    if (dpi > 0) {
++        return QDpi(dpi, dpi);
++    }
++
++    if (Q_UNLIKELY(!output)) {
++        return QDpi(96, 96);
++    }
++
++    const QSize physicalSize = output->physicalSize();
++    const QSize pixelSize = output->modeSize();
++    if (physicalSize.width() <= 0 || physicalSize.height() <= 0 || pixelSize.isEmpty()) {
++        return QDpi(96, 96);
++    }
++
++    const qreal diagonalPixels = std::hypot(qreal(pixelSize.width()), qreal(pixelSize.height()));
++    const qreal diagonalInches = std::hypot(qreal(physicalSize.width()), qreal(physicalSize.height())) / 25.4;
++    const int computedDpi = std::lround(diagonalPixels / diagonalInches);
++    if (computedDpi < 48 || computedDpi > 1000) {
++        return QDpi(96, 96);
++    }
++    return QDpi(computedDpi, computedDpi);
++}
++
+ Screen::Screen(LogicalOutput *output, Integration *integration)
+     : m_output(output)
+     , m_cursor(new PlatformCursor)
+@@ -83,8 +111,7 @@
+ 
+ QDpi Screen::logicalDpi() const
+ {
+-    const int dpi = forcedDpi();
+-    return dpi > 0 ? QDpi(dpi, dpi) : QDpi(96, 96);
++    return outputDpi(m_output);
+ }
+ 
+ qreal Screen::devicePixelRatio() const
