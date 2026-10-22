@@ -137,6 +137,20 @@ jobs:
               package="$(find "$output_dir" -maxdepth 1 -type f \
                 -name "*.pkg.tar.zst" -print -quit)"
               test -n "$package"
+
+              # makepkg archives the package with bsdtar without --xattrs, so
+              # the security.capability xattr set by package() never reaches
+              # the deliverable.  Re-stage the package with xattrs so the
+              # capability is actually part of the .pkg.tar.zst.
+              stage=/tmp/pkgrepack
+              rm -rf "$stage"
+              install -d "$stage"
+              tar --zstd --xattrs -xf "$package" -C "$stage"
+              setcap CAP_SYS_NICE=+ep "$stage/usr/bin/kwin_wayland"
+              tar --zstd --xattrs --owner=0 --group=0 --numeric-owner \
+                -cf "$package.new" -C "$stage" .
+              mv -f "$package.new" "$package"
+
               pacman -Qip "$package"
               pacman -Qlp "$package" | grep -F /usr/bin/kwin_wayland
               pacman -Qlp "$package" | grep -F /usr/lib/kwin
@@ -190,11 +204,20 @@ jobs:
 
              sudo pacman -U kwin-6.8.0-*-aarch64.pkg.tar.zst
 
-          2. Restart the display manager so the new compositor is loaded:
+          2. Verify the capability survived installation:
+
+             getcap /usr/bin/kwin_wayland
+
+             It must report `cap_sys_nice=ep`.  If your pacman dropped
+             the xattr while unpacking, restore it manually:
+
+             sudo setcap CAP_SYS_NICE=+ep /usr/bin/kwin_wayland
+
+          3. Restart the display manager so the new compositor is loaded:
 
              sudo systemctl restart sddm.service
 
-          3. Verify the patched behaviour in the user journal:
+          4. Verify the patched behaviour in the user journal:
 
              journalctl --user-unit plasma-kwin_wayland.service -b | grep -c 'atomic commit failed'
 
@@ -203,7 +226,7 @@ jobs:
              ~49 ms the MSM commit worker needs to release the CRTC.  Once
              the budget runs out the existing drop path remains the fallback.
 
-          4. Verify the R11T panel DPI patch is active:
+          5. Verify the R11T panel DPI patch is active:
 
              kscreen-doctor -o
 
@@ -212,7 +235,7 @@ jobs:
           (about 401 DPI), so fonts and controls are physically sized
           without resampling the framebuffer.
 
-          5. Roll back with the stock package from the ALARM repository:
+          6. Roll back with the stock package from the ALARM repository:
 
              sudo pacman -Sy kwin
 
