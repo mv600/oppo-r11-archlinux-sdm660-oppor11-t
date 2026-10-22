@@ -138,19 +138,6 @@ jobs:
                 -name "*.pkg.tar.zst" -print -quit)"
               test -n "$package"
 
-              # makepkg archives the package with bsdtar without --xattrs, so
-              # the security.capability xattr set by package() never reaches
-              # the deliverable.  Re-stage the package with xattrs so the
-              # capability is actually part of the .pkg.tar.zst.
-              stage=/tmp/pkgrepack
-              rm -rf "$stage"
-              install -d "$stage"
-              tar --zstd --xattrs -xf "$package" -C "$stage"
-              setcap CAP_SYS_NICE=+ep "$stage/usr/bin/kwin_wayland"
-              tar --zstd --xattrs --owner=0 --group=0 --numeric-owner \
-                -cf "$package.new" -C "$stage" .
-              mv -f "$package.new" "$package"
-
               pacman -Qip "$package"
               pacman -Qlp "$package" | grep -F /usr/bin/kwin_wayland
               pacman -Qlp "$package" | grep -F /usr/lib/kwin
@@ -160,9 +147,13 @@ jobs:
               # stable across minor Qt releases, so a mismatched binary cannot
               # even start on the device.  Inspect the binary inside the package
               # so the check covers exactly what will be installed.
+              # bsdtar restores the PAX security.capability xattr that
+              # makepkg stored in the archive; GNU tar cannot read those
+              # extended headers, so the extraction must use the same tool
+              # family that produced the package.
               rm -rf /tmp/qtcheck
               mkdir -p /tmp/qtcheck
-              tar --zstd --xattrs -xf "$package" -C /tmp/qtcheck usr/bin/kwin_wayland
+              zstd -dc "$package" | bsdtar -xf - -C /tmp/qtcheck usr/bin/kwin_wayland
               built_qt="$(objdump -T /tmp/qtcheck/usr/bin/kwin_wayland \
                 | grep -oE "Qt_6\.[0-9]+" | sort -uV | tail -1)"
               echo "built kwin_wayland requires $built_qt, phone has $EXPECTED_QT_SYMBOL"
