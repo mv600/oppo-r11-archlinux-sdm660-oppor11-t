@@ -90,6 +90,11 @@ jobs:
             --workdir /workspace \
             "$BUILD_IMAGE" \
             bash -euxo pipefail -c '
+              # The pinned image ships without pacman databases. Refresh the
+              # indexes so makepkg can resolve dependencies, but do not
+              # upgrade the pinned toolchain or its Qt/KF6 packages.
+              pacman -Sy --noconfirm
+
               package_dir=/workspace/archlinux/kwin-r11t
               output_dir=/workspace/kwin-package
               build_dir=/build/kwin
