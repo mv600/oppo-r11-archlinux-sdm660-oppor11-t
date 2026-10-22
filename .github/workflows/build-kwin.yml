@@ -124,7 +124,9 @@ jobs:
               # Fail closed if the R11T panel DPI patch did not make it into
               # the source tree.  The patch keeps native 1080x1920 scanout and
               # changes only the Qt logical DPI, derived from 68x122 mm.
-              screen_cpp="$build_dir/kwin-$KWIN_VERSION/src/plugins/qpa/screen.cpp"
+              # makepkg extracts the tarball into its own src/ subtree, so
+              # the built (patched) tree lives one level below $build_dir.
+              screen_cpp="$build_dir/src/kwin-$KWIN_VERSION/src/plugins/qpa/screen.cpp"
               grep -F "const QSize physicalSize = output->physicalSize();" \
                 "$screen_cpp"
               grep -A2 -F "QDpi Screen::logicalDpi() const" "$screen_cpp" \
