@@ -106,6 +106,15 @@ prepare() {
 }
 
 build() {
+  # Control the debug symbols shipped in the package: emit no debug info
+  # (-g0).  Debug data embeds the build path ($srcdir), which makepkg
+  # flags as "Package contains reference to $srcdir" on the kwin
+  # executables.  The flags are appended after any -g that may come
+  # from the builder image's makepkg.conf, so -g0 wins.
+  export CFLAGS="$CFLAGS -g0"
+  export CXXFLAGS="$CXXFLAGS -g0"
+  export LDFLAGS="$LDFLAGS -g0"
+
   cmake -B build -S "$pkgname-$pkgver" \
     -DKDE_INSTALL_LIBEXECDIR=lib \
     -DBUILD_TESTING=OFF
