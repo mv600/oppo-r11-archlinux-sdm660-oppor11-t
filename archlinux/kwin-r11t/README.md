@@ -38,25 +38,29 @@ The patch:
 3. resets the retry counter after a successful commit and only logs a warning
    if the retry budget is exhausted.
 
-### 0003 - native-pixel output with panel-derived DPI
+### 0003 - report panel-derived DPI to KWin's own QPA
 
-KWin's QPA screen implementation previously returned `QDpi(96, 96)` whenever
-`QT_WAYLAND_FORCE_DPI` was unset.  On the R11T panel that makes a 5.5-inch
-1080p screen look like a low-density desktop: fonts, decorations and controls
-are physically too small even though the framebuffer is correct.
-
-`0003` keeps the compositor output at the native mode size (`1080x1920`,
-`scale=1`) and changes only the Qt logical DPI.  It computes DPI from the
-panel geometry exposed by the DRM connector:
+KWin's QPA screen implementation normally returns `QDpi(96, 96)`.  The R11T
+panel is physically dense, so `0003` computes logical DPI from the DRM
+connector dimensions:
 
 ```text
 hypot(1080, 1920) / (hypot(68, 122) / 25.4) = 401 DPI
 ```
 
-The explicit `QT_WAYLAND_FORCE_DPI` override remains the first choice, and
-invalid or missing physical dimensions fall back to 96 DPI.  This avoids
-full-screen scale factors and their resampling cost; fonts and controls are
-sized from the actual panel instead.
+`QT_WAYLAND_FORCE_DPI` still takes precedence, and invalid or missing physical
+dimensions fall back to 96 DPI.  The patch keeps the output at the native
+`1080x1920` mode and does not change the output scale.
+
+Scope matters: `0003` changes the QPA of the `kwin_wayland` process only.  It
+does not set DPI for `plasmashell`, Konsole, or other independent Wayland
+clients, and it does not enlarge their buttons or layouts.  On Qt 6.12,
+`QT_FONT_DPI` and `QT_WAYLAND_FORCE_DPI` enlarge fonts only when
+`QT_ENABLE_HIGHDPI_SCALING=0`; with HighDPI enabled they change the client DPR
+as well.  Making Qt geometry and controls larger therefore requires
+client-side HighDPI scaling (`QT_SCALE_FACTOR`, per-screen scale factors, or an
+equivalent compositor/output scale).  The KWin patch is not a system-wide DPI
+switch.
 
 ## Building
 
