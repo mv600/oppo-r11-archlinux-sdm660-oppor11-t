@@ -44,7 +44,7 @@ jobs:
       KWIN_VERSION: 6.8.0
       KWIN_TARBALL_SHA256: 4bfaf31e29a8f9fdf231dc3bbb9b09b0ce07cae9fee7a01cfc86425ece796258
       EBUSY_PATCH_SHA256: b7f7fbd87fda9524ef247f1f244541670cd2a092937e89855dafc85c2ad0dc09
-      DPI_PATCH_SHA256: 2d19e328ca7c54bc2c66da26195bef9ab16e60d2e297a4d68f94da0d1c2b1111
+      DPI_PATCH_SHA256: 83233006bc4486c4fa7ccc73f0f8a93311c16937d8fa6a2c9eb8c0974ccfe034
 
     steps:
       - name: Checkout deployment repository
@@ -131,6 +131,8 @@ jobs:
                 "$screen_cpp"
               grep -A2 -F "QDpi Screen::logicalDpi() const" "$screen_cpp" \
                 | grep -F "return outputDpi(m_output);"
+              grep -A2 -F "QDpi PlaceholderScreen::logicalDpi() const" "$screen_cpp" \
+                | grep -F "return outputDpi(nullptr);"
 
               ls -la "$output_dir"
 

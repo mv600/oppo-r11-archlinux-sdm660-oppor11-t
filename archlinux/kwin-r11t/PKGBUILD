@@ -98,7 +98,7 @@ source=(https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz
         0003-kwin-qpa-use-panel-physical-dpi.patch)
 sha256sums=('4bfaf31e29a8f9fdf231dc3bbb9b09b0ce07cae9fee7a01cfc86425ece796258'
             'b7f7fbd87fda9524ef247f1f244541670cd2a092937e89855dafc85c2ad0dc09'
-            '2d19e328ca7c54bc2c66da26195bef9ab16e60d2e297a4d68f94da0d1c2b1111')
+            '83233006bc4486c4fa7ccc73f0f8a93311c16937d8fa6a2c9eb8c0974ccfe034')
 
 prepare() {
   patch -d "$pkgname-$pkgver" -p1 -i "$srcdir/0001-kwin-drm-EBUSY-retry-on-next-vblank.patch"
