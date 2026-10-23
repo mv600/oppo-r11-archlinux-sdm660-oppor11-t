@@ -61,8 +61,24 @@ pstore_rescue() {
 	[ -d /sys/fs/pstore ] || return 0
 	ls -A /sys/fs/pstore 2>/dev/null | grep -q . || return 0
 
+	# /var/log is a separate btrfs subvolume (@var_log) in the installed
+	# system.  Writing under the @ subvolume here would be hidden as soon as
+	# systemd mounts @var_log on /var/log.  Mount the real target first.
+	rescue_log=/newroot/var/log
+	rescue_base=$rescue_log/pstore
+	mkdir -p "$rescue_log" 2>/dev/null || true
+	if ! mountpoint -q "$rescue_log" 2>/dev/null; then
+		if ! mount -t btrfs -o rw,noatime,compress=zstd:3,space_cache=v2,subvol=@var_log \
+			"$ROOT_DEV" "$rescue_log" 2>/dev/null; then
+			# Keep the fallback visible after systemd mounts @var_log on
+			# /var/log.  /var/lib is part of the @ subvolume.
+			rescue_base=/newroot/var/lib/r11t-pstore
+			echo ">>> r11t: WARNING: cannot mount @var_log; pstore falls back to /var/lib/r11t-pstore" > /dev/kmsg 2>/dev/null || true
+		fi
+	fi
+
 	ts=$(date +%Y%m%d-%H%M%S 2>/dev/null) || ts=unknown
-	dir=/newroot/var/log/pstore/early-$ts
+	dir=$rescue_base/early-$ts
 	if [ -e "$dir" ]; then
 		dir=$dir-$$
 	fi
@@ -74,7 +90,7 @@ pstore_rescue() {
 
 	# 只保留最近 8 份 early-*
 	n=0
-	for d in $(ls -1dt /newroot/var/log/pstore/early-* 2>/dev/null); do
+	for d in $(ls -1dt "$rescue_base"/early-* 2>/dev/null); do
 		n=$((n + 1))
 		[ "$n" -gt 8 ] && rm -rf "$d" 2>/dev/null || true
 	done
