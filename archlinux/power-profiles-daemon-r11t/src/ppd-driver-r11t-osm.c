@@ -7,7 +7,7 @@
  *
  *   power-saver  - cap the maximum frequency of both clusters
  *   balanced     - restore both clusters to their hardware limits
- *   performance  - pin both clusters to their maximum frequency
+ *   performance  - expose maximum frequency without pinning the floor
  */
 
 #define G_LOG_DOMAIN "R11tOsmDriver"
@@ -251,8 +251,8 @@ ppd_driver_r11t_osm_activate_profile (PpdDriver                   *driver,
     perfcl_target_max = perfcl_max;
     break;
   case PPD_PROFILE_PERFORMANCE:
-    pwrcl_target_min = pwrcl_max;
-    perfcl_target_min = perfcl_max;
+    pwrcl_target_min = pwrcl_min;
+    perfcl_target_min = perfcl_min;
     pwrcl_target_max = pwrcl_max;
     perfcl_target_max = perfcl_max;
     break;

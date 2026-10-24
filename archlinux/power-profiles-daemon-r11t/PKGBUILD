@@ -1,7 +1,7 @@
 # Maintainer: R11T Arch Linux ARM integration
 pkgname=power-profiles-daemon
 pkgver=0.30
-pkgrel=3
+pkgrel=4
 pkgdesc='Makes power profiles handling available over D-Bus (R11T OSM platform driver)'
 url='https://gitlab.freedesktop.org/upower/power-profiles-daemon'
 license=(GPL-3.0-only)
@@ -25,7 +25,7 @@ checkdepends=(python-dbusmock
 source=("$pkgname-$pkgver.tar.gz::https://gitlab.freedesktop.org/upower/$pkgname/-/archive/$pkgver/$pkgname-$pkgver.tar.gz"
         'power-profiles-daemon-r11t-osm.patch')
 sha256sums=('90f2c95024861d9f4062abedd514084939224e7a49edd468f001af7260ec8e6c'
-            'c0306e4df5b6eddcd258bed50c84fb84f771cad37691273a7bb060b2446df894')
+            '3bbaa005d23eeb041525fcb55679002e5e44885ccbdd3594530f2a8b53411337')
 
 prepare() {
   cd "$pkgname-$pkgver"
