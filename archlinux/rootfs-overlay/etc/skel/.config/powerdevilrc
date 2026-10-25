@@ -1,11 +1,11 @@
 [AC][SuspendAndShutdown]
-AutoSuspendAction=0
+AutoSuspendAction=1
 PowerButtonAction=128
 
 [Battery][SuspendAndShutdown]
-AutoSuspendAction=0
+AutoSuspendAction=1
 PowerButtonAction=128
 
 [LowBattery][SuspendAndShutdown]
-AutoSuspendAction=0
+AutoSuspendAction=1
 PowerButtonAction=128
