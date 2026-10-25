@@ -1,0 +1,51 @@
+#!/bin/sh
+set -eu
+
+configfs_root=${R11T_CONFIGFS_ROOT:-/sys/kernel/config}
+udc_class=${R11T_UDC_CLASS:-/sys/class/udc}
+run_dir=${R11T_RUN_DIR:-/run/r11t}
+gadget=$configfs_root/usb_gadget/r11t
+udc_file=$gadget/UDC
+state_file=$run_dir/suspend-usb-gadget.udc
+
+rebind()
+{
+	udc=$1
+
+	[ -e "$udc_file" ] || return 1
+	[ -e "$udc_class/$udc" ] || return 1
+	current=$(cat "$udc_file")
+	[ "$current" = "$udc" ] && return 0
+	[ -z "$current" ] || return 1
+
+	printf '%s' "$udc" > "$udc_file"
+	[ "$(cat "$udc_file")" = "$udc" ]
+}
+
+case ${1:-} in
+pre)
+	[ -e "$udc_file" ] || exit 0
+	udc=$(cat "$udc_file")
+	[ -n "$udc" ] || exit 0
+	[ -e "$udc_class/$udc" ] || exit 1
+
+	mkdir -p "$run_dir"
+	printf '%s\n' "$udc" > "$state_file"
+	if ! printf '\n' > "$udc_file" || [ -n "$(cat "$udc_file")" ]; then
+		rm -f "$state_file"
+		rebind "$udc" || true
+		exit 1
+	fi
+	;;
+post)
+	[ -e "$state_file" ] || exit 0
+	IFS= read -r udc < "$state_file" || [ -n "${udc:-}" ]
+	rm -f "$state_file"
+	[ -n "${udc:-}" ] || exit 0
+	rebind "$udc"
+	;;
+*)
+	echo "usage: $0 pre|post" >&2
+	exit 2
+	;;
+esac
