@@ -93,7 +93,7 @@ jobs:
                 usr/lib/dri/venus_drv_video.so
               file /tmp/venus-check/usr/lib/dri/venus_drv_video.so
               nm -D --defined-only /tmp/venus-check/usr/lib/dri/venus_drv_video.so \
-                | grep -F __vaDriverInit_1_0
+                | grep -E '__vaDriverInit_1_[0-9]+'
 
               chmod 0644 "$output_dir"/*.pkg.tar.zst
               chmod 0777 "$output_dir"
