@@ -5,7 +5,7 @@
 
 pkgname=venus-vaapi-r11t
 pkgver=0.12.0.r14.g37e1030
-pkgrel=1
+pkgrel=2
 pkgdesc='VA-API backend for the Qualcomm Venus V4L2 decoder'
 arch=(aarch64)
 url='https://github.com/snowf14k3/venus-vaapi-driver'
@@ -21,6 +21,13 @@ provides=(venus-vaapi-driver)
 conflicts=(venus-vaapi-driver)
 source=('venus-vaapi-driver::git+https://github.com/snowf14k3/venus-vaapi-driver.git#commit=37e1030aba11f66e303e4f5fb0c3a13e2a78265e')
 sha256sums=('SKIP')
+
+prepare() {
+  # The upstream build uses -Werror. GCC 15 diagnoses a possible truncation
+  # in an encoder diagnostic string which is unrelated to the decoder path.
+  sed -i 's/    char last_operation\[64\];/    char last_operation[128];/' \
+    venus-vaapi-driver/src/v4l2_encoder.c
+}
 
 build() {
   meson setup build venus-vaapi-driver \
