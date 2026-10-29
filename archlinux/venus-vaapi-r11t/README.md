@@ -5,13 +5,15 @@ a VA-API driver for this path, so `vainfo` fails with error code -1 and
 applications that require VA-API cannot initialize.
 
 This package builds the pinned `snowf14k3/venus-vaapi-driver` commit and
-installs `/usr/lib/dri/venus_drv_video.so`. It is an independent userspace
-backend, not part of Mesa or the kernel.
+installs `/usr/lib/dri/venus_drv_video.so`, plus the `msm_drv_video.so` alias
+used by libva's default driver discovery for the Adreno render node. It is an
+independent userspace backend, not part of Mesa or the kernel.
 
 Validate before enabling it system-wide:
 
 ```sh
 LIBVA_DRIVER_NAME=venus vainfo --display drm --device /dev/dri/renderD128
+vainfo --display drm --device /dev/dri/renderD128
 ```
 
 The driver currently supports H.264, VP8 and VP9 decode. HEVC decode is an

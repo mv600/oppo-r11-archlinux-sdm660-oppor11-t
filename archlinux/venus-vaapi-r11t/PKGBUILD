@@ -5,7 +5,7 @@
 
 pkgname=venus-vaapi-r11t
 pkgver=0.12.0.r14.g37e1030
-pkgrel=2
+pkgrel=3
 pkgdesc='VA-API backend for the Qualcomm Venus V4L2 decoder'
 arch=(aarch64)
 url='https://github.com/snowf14k3/venus-vaapi-driver'
@@ -42,4 +42,9 @@ build() {
 
 package() {
   DESTDIR="$pkgdir" meson install -C build
+
+  # libva derives the DRI driver name from the DRM device driver. The msm
+  # render node therefore looks for msm_drv_video.so unless the application
+  # explicitly selects venus. Ship both names so default VA-API probing works.
+  ln -s venus_drv_video.so "$pkgdir/usr/lib/dri/msm_drv_video.so"
 }

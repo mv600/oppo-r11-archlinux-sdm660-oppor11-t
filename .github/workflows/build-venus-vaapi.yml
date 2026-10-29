@@ -86,6 +86,7 @@ jobs:
               test -n "$package"
               pacman -Qip "$package"
               pacman -Qlp "$package" | grep -F /usr/lib/dri/venus_drv_video.so
+              pacman -Qlp "$package" | grep -F /usr/lib/dri/msm_drv_video.so
 
               rm -rf /tmp/venus-check
               mkdir -p /tmp/venus-check
@@ -115,13 +116,14 @@ jobs:
 
              sudo pacman -U venus-vaapi-r11t-*.pkg.tar.zst
 
-          2. Probe the driver explicitly:
+          2. Probe both the explicit driver name and default discovery:
 
              LIBVA_DRIVER_NAME=venus vainfo --display drm --device /dev/dri/renderD128
+             vainfo --display drm --device /dev/dri/renderD128
 
           3. Decode a known H.264 file through VA-API:
 
-             LIBVA_DRIVER_NAME=venus ffmpeg -hwaccel vaapi \
+             ffmpeg -hwaccel vaapi \
                -vaapi_device /dev/dri/renderD128 \
                -i test-h264.mp4 -f null -
 
