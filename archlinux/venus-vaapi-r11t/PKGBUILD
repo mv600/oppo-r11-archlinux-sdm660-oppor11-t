@@ -25,7 +25,10 @@ sha256sums=('SKIP')
 prepare() {
   # The upstream build uses -Werror. GCC 15 diagnoses a possible truncation
   # in an encoder diagnostic string which is unrelated to the decoder path.
-  sed -i 's/    char last_operation\[64\];/    char last_operation[128];/' \
+  sed -i 's/char operation\[64\];/char operation[128];/' \
+    venus-vaapi-driver/src/v4l2_common.h
+  sed -i 's/char last_operation\[64\];/char last_operation[128];/' \
+    venus-vaapi-driver/src/v4l2_decoder.c \
     venus-vaapi-driver/src/v4l2_encoder.c
 }
 

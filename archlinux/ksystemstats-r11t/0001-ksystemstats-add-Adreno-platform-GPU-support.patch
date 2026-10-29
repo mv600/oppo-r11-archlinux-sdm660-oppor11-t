@@ -85,7 +85,13 @@
 +};
 --- a/plugins/gpu/LinuxBackend.cpp
 +++ b/plugins/gpu/LinuxBackend.cpp
-@@ -12,6 +12,7 @@
+@@ -7,11 +7,13 @@
+ #include "LinuxBackend.h"
+ 
+ #include <KLocalizedString>
++#include <QFileInfo>
+ 
+ #include <libudev.h>
  
  #include <processcore/gpu_utils.h>
  
@@ -93,7 +99,7 @@
  #include "LinuxAmdGpu.h"
  #include "LinuxIntelGpu.h"
  #include "LinuxNvidiaGpu.h"
-@@ -97,6 +98,39 @@
+@@ -97,6 +99,39 @@
      }
  
      udev_enumerate_unref(enumerate);
