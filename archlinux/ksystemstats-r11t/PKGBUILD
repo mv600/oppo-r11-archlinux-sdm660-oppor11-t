@@ -1,0 +1,49 @@
+# Maintainer: R11T Arch Linux port <lmv600vm@gmail.com>
+#
+# Derived from the official Arch Linux extra/ksystemstats PKGBUILD.
+# The local patch adds platform Adreno support for the R11T GPU.
+
+pkgname=ksystemstats
+pkgver=6.8.2
+_dirver=$(echo $pkgver | cut -d. -f1-3)
+pkgrel=1.1
+pkgdesc='A plugin based system monitoring daemon'
+arch=(aarch64)
+url='https://kde.org/plasma-desktop/'
+license=(LGPL-2.0-or-later)
+depends=(glibc
+         kcoreaddons
+         kcrash
+         ki18n
+         kio
+         libksysguard
+         libstdc++
+         lm_sensors
+         qt6-base
+         solid)
+makedepends=(extra-cmake-modules
+             libnl
+             networkmanager-qt)
+optdepends=('libnl: network usage monitor'
+            'networkmanager-qt: network usage monitor'
+            'systemd-libs: GPU monitor')
+groups=(plasma)
+source=(https://download.kde.org/stable/plasma/$_dirver/$pkgname-$pkgver.tar.xz
+        0001-ksystemstats-add-Adreno-platform-GPU-support.patch)
+sha256sums=('2a71fa12b3dd8ad4a6c31feae253b1d1ed7fb0ddd44c8d27a32b63583f8b4889'
+            'SKIP')
+
+prepare() {
+  patch -d "$pkgname-$pkgver" -p1 -i "$srcdir/0001-ksystemstats-add-Adreno-platform-GPU-support.patch"
+}
+
+build() {
+  cmake -B build -S "$pkgname-$pkgver" \
+    -DBUILD_TESTING=OFF \
+    -DKDE_INSTALL_LIBEXECDIR=lib
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}

@@ -1,0 +1,35 @@
+# Maintainer: R11T Arch Linux port <lmv600vm@gmail.com>
+#
+# VA-API frontend for the Qualcomm Venus stateful V4L2 M2M decoder.
+# Pinned to the upstream commit that was reviewed for this port.
+
+pkgname=venus-vaapi-r11t
+pkgver=0.12.0.r14.g37e1030
+pkgrel=1
+pkgdesc='VA-API backend for the Qualcomm Venus V4L2 decoder'
+arch=(aarch64)
+url='https://github.com/snowf14k3/venus-vaapi-driver'
+license=(MIT)
+depends=(glibc
+         gcc-libs
+         libdrm
+         libva)
+makedepends=(git
+             meson
+             ninja)
+provides=(venus-vaapi-driver)
+conflicts=(venus-vaapi-driver)
+source=('venus-vaapi-driver::git+https://github.com/snowf14k3/venus-vaapi-driver.git#commit=37e1030aba11f66e303e4f5fb0c3a13e2a78265e')
+sha256sums=('SKIP')
+
+build() {
+  meson setup build venus-vaapi-driver \
+    --prefix=/usr \
+    --libdir=/usr/lib \
+    --buildtype=release
+  meson compile -C build
+}
+
+package() {
+  DESTDIR="$pkgdir" meson install -C build
+}

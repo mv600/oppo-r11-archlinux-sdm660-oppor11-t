@@ -1,0 +1,135 @@
+--- a/plugins/gpu/CMakeLists.txt
++++ b/plugins/gpu/CMakeLists.txt
+@@ -12,7 +12,7 @@
+     include(CheckIncludeFile)
+     check_include_file("drm/xe_drm.h" HAVE_XE_DRM_H)
+ 
+-    target_sources(ksystemstats_plugin_gpu PRIVATE LinuxAmdGpu.cpp LinuxIntelGpu.cpp LinuxNvidiaGpu.cpp LinuxBackend.cpp NvidiaGpu.cpp NvidiaSmiProcess.cpp)
++    target_sources(ksystemstats_plugin_gpu PRIVATE LinuxAdrenoGpu.cpp LinuxAmdGpu.cpp LinuxIntelGpu.cpp LinuxNvidiaGpu.cpp LinuxBackend.cpp NvidiaGpu.cpp NvidiaSmiProcess.cpp)
+ 
+     if(HAVE_XE_DRM_H)
+         target_sources(ksystemstats_plugin_gpu PRIVATE LinuxXeGpu.cpp)
+--- a/plugins/gpu/LinuxAdrenoGpu.cpp
++++ b/plugins/gpu/LinuxAdrenoGpu.cpp
+@@ -0,0 +1,37 @@
++/*
++ * SPDX-FileCopyrightText: 2026 R11T Arch Linux port
++ * SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++ */
++
++#include "LinuxAdrenoGpu.h"
++
++#include <systemstats/SysFsSensor.h>
++
++LinuxAdrenoGpu::LinuxAdrenoGpu(const QString &id, const QString &name, const QString &devfreqPath)
++    : GpuDevice(id, name)
++{
++    auto usage = new KSysGuard::SysFsSensor(QStringLiteral("usage"),
++                                             devfreqPath % QStringLiteral("/gpu_busy_percent"), 0, this);
++    m_usageProperty = usage;
++    m_usageSensor = usage;
++
++    auto frequency = new KSysGuard::SysFsSensor(QStringLiteral("coreFrequency"),
++                                                 devfreqPath % QStringLiteral("/cur_freq"), 0, this);
++    frequency->setConvertFunction([](const QByteArray &input) {
++        return std::atoll(input) / 1000;
++    });
++    m_coreFrequencyProperty = frequency;
++    m_coreFrequencySensor = frequency;
++}
++
++void LinuxAdrenoGpu::update()
++{
++    m_usageSensor->update();
++    m_coreFrequencySensor->update();
++}
++
++void LinuxAdrenoGpu::makeSensors()
++{
++}
++
++#include "moc_LinuxAdrenoGpu.cpp"
+--- a/plugins/gpu/LinuxAdrenoGpu.h
++++ b/plugins/gpu/LinuxAdrenoGpu.h
+@@ -0,0 +1,31 @@
++/*
++ * SPDX-FileCopyrightText: 2026 R11T Arch Linux port
++ * SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only OR LicenseRef-KDE-Accepted-GPL
++ */
++
++#pragma once
++
++#include "GpuDevice.h"
++
++namespace KSysGuard
++{
++class SysFsSensor;
++}
++
++class LinuxAdrenoGpu : public GpuDevice
++{
++    Q_OBJECT
++
++public:
++    LinuxAdrenoGpu(const QString &id, const QString &name, const QString &devfreqPath);
++    ~LinuxAdrenoGpu() override = default;
++
++    void update() override;
++
++protected:
++    void makeSensors() override;
++
++private:
++    KSysGuard::SysFsSensor *m_usageSensor = nullptr;
++    KSysGuard::SysFsSensor *m_coreFrequencySensor = nullptr;
++};
+--- a/plugins/gpu/LinuxBackend.cpp
++++ b/plugins/gpu/LinuxBackend.cpp
+@@ -12,6 +12,7 @@
+ 
+ #include <processcore/gpu_utils.h>
+ 
++#include "LinuxAdrenoGpu.h"
+ #include "LinuxAmdGpu.h"
+ #include "LinuxIntelGpu.h"
+ #include "LinuxNvidiaGpu.h"
+@@ -97,6 +98,39 @@
+     }
+ 
+     udev_enumerate_unref(enumerate);
++
++    enumerate = udev_enumerate_new(m_udev);
++    udev_enumerate_add_match_subsystem(enumerate, "platform");
++    udev_enumerate_add_match_property(enumerate, "DRIVER", "adreno");
++    udev_enumerate_scan_devices(enumerate);
++
++    devices = udev_enumerate_get_list_entry(enumerate);
++    for (auto entry = devices; entry; entry = udev_list_entry_get_next(entry)) {
++        auto path = udev_list_entry_get_name(entry);
++        auto platformDevice = udev_device_new_from_syspath(m_udev, path);
++        if (!platformDevice) {
++            continue;
++        }
++
++        auto sysname = QString::fromLocal8Bit(udev_device_get_sysname(platformDevice));
++        auto devfreqPath = QStringLiteral("/sys/class/devfreq/%1").arg(sysname);
++        if (!QFileInfo::exists(devfreqPath % QStringLiteral("/gpu_busy_percent"))) {
++            qCWarning(KSYSTEMSTATS_GPU) << "Adreno GPU has no busy-percent devfreq attribute:" << sysname;
++            udev_device_unref(platformDevice);
++            continue;
++        }
++
++        auto gpuId = QStringLiteral("gpu%1").arg(gpuNumber);
++        auto gpu = new LinuxAdrenoGpu(gpuId, QStringLiteral("Adreno GPU"), devfreqPath);
++        gpu->initialize();
++        m_devices.append(gpu);
++        Q_EMIT deviceAdded(gpu);
++        gpuNumber++;
++
++        udev_device_unref(platformDevice);
++    }
++
++    udev_enumerate_unref(enumerate);
+ }
+ 
+ void LinuxBackend::stop()

@@ -1,0 +1,161 @@
+name: Build R11T ksystemstats
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'archlinux/ksystemstats-r11t/**'
+      - '.github/workflows/build-ksystemstats.yml'
+  pull_request:
+    paths:
+      - 'archlinux/ksystemstats-r11t/**'
+      - '.github/workflows/build-ksystemstats.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ksystemstats-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-aarch64:
+    name: Build aarch64 ksystemstats package
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+
+    env:
+      BUILD_IMAGE: menci/archlinuxarm:base-devel-20261015.38692846456
+      EXPECTED_QT_SYMBOL: Qt_6.12
+      KSYSTEMSTATS_VERSION: 6.8.2
+      KSYSTEMSTATS_TARBALL_SHA256: 2a71fa12b3dd8ad4a6c31feae253b1d1ed7fb0ddd44c8d27a32b63583f8b4889
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v4
+
+      - name: Validate delivery layout
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/archlinux/ksystemstats-r11t"
+          test -f "$package_dir/PKGBUILD"
+          test -f "$package_dir/0001-ksystemstats-add-Adreno-platform-GPU-support.patch"
+          bash -n "$package_dir/PKGBUILD"
+          grep -F "pkgver=$KSYSTEMSTATS_VERSION" "$package_dir/PKGBUILD"
+          grep -F "$KSYSTEMSTATS_TARBALL_SHA256" "$package_dir/PKGBUILD"
+
+      - name: Verify patch against the released ksystemstats sources
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/archlinux/ksystemstats-r11t"
+          work="$RUNNER_TEMP/ksystemstats-patch-check"
+          rm -rf "$work"
+          mkdir -p "$work"
+          cd "$work"
+          curl -fsSLO "https://download.kde.org/stable/plasma/$KSYSTEMSTATS_VERSION/ksystemstats-$KSYSTEMSTATS_VERSION.tar.xz"
+          echo "$KSYSTEMSTATS_TARBALL_SHA256  ksystemstats-$KSYSTEMSTATS_VERSION.tar.xz" | sha256sum -c -
+          tar xf "ksystemstats-$KSYSTEMSTATS_VERSION.tar.xz"
+          patch -d "ksystemstats-$KSYSTEMSTATS_VERSION" -p1 \
+            -i "$package_dir/0001-ksystemstats-add-Adreno-platform-GPU-support.patch"
+
+      - name: Build package in Arch Linux ARM
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/ksystemstats-package"
+          docker run --rm --privileged \
+            --platform linux/arm64 \
+            --env EXPECTED_QT_SYMBOL="$EXPECTED_QT_SYMBOL" \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$BUILD_IMAGE" \
+            bash -euxo pipefail -c '
+              pacman -Sy --noconfirm
+
+              package_dir=/workspace/archlinux/ksystemstats-r11t
+              output_dir=/workspace/ksystemstats-package
+              build_dir=/build/ksystemstats
+
+              rm -rf "$build_dir"
+              install -d -m 0755 "$build_dir" "$output_dir"
+              cp -a "$package_dir/." "$build_dir/"
+
+              if ! id builder >/dev/null 2>&1; then
+                useradd --create-home --shell /bin/bash builder
+              fi
+              printf "%s\n" "builder ALL=(ALL) NOPASSWD: ALL" \
+                > /etc/sudoers.d/makepkg-builder
+              chmod 0440 /etc/sudoers.d/makepkg-builder
+              chown -R builder:builder "$build_dir"
+              chown builder:builder "$output_dir"
+
+              printf "PKGDEST=%s\nPKGEXT=.pkg.tar.zst\n" "$output_dir" \
+                >> /etc/makepkg.conf
+
+              runuser -u builder -- env HOME=/home/builder \
+                bash -euxo pipefail -c "
+                  cd \"$build_dir\"
+                  makepkg --syncdeps --noconfirm --cleanbuild --log
+                "
+
+              package="$(find "$output_dir" -maxdepth 1 -type f \
+                -name "*.pkg.tar.zst" -print -quit)"
+              test -n "$package"
+              pacman -Qip "$package"
+              pacman -Qlp "$package" | grep -F /usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so
+
+              rm -rf /tmp/qtcheck
+              mkdir -p /tmp/qtcheck
+              zstd -dc "$package" | bsdtar -xf - -C /tmp/qtcheck \
+                usr/lib/qt6/plugins/ksystemstats/ksystemstats_plugin_gpu.so
+
+              built_qt="$(find /tmp/qtcheck -name ksystemstats_plugin_gpu.so -print -quit)"
+              test -n "$built_qt"
+              built_qt="$(objdump -T "$built_qt" \
+                | grep -oE "Qt_6\.[0-9]+" | sort -uV | tail -1)"
+              echo "built GPU plugin requires $built_qt, phone has $EXPECTED_QT_SYMBOL"
+              if [ "$built_qt" != "$EXPECTED_QT_SYMBOL" ]; then
+                echo "::error::ksystemstats GPU plugin targets $built_qt but the R11T has $EXPECTED_QT_SYMBOL"
+                exit 1
+              fi
+
+              chmod 0644 "$output_dir"/*.pkg.tar.zst
+              chmod 0777 "$output_dir"
+            '
+
+      - name: Checksum and document package
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/ksystemstats-package"
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+          cat > INSTALL.md <<'EOF'
+          # Install the R11T ksystemstats package
+
+          This build adds platform Adreno GPU discovery to the KDE system monitor.
+          It requires the matching msm module with the cached
+          `gpu_busy_percent` devfreq attribute.
+
+          1. Install the package:
+
+             sudo pacman -U ksystemstats-6.8.2-*.pkg.tar.zst
+
+          2. Restart the user service:
+
+             systemctl --user restart plasma-ksystemstats.service
+
+          3. Verify that the system monitor shows the Adreno GPU usage and
+             frequency sensors.
+          EOF
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ksystemstats-r11t-aarch64
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            ksystemstats-package/*.pkg.tar.zst
+            ksystemstats-package/SHA256SUMS
+            ksystemstats-package/INSTALL.md

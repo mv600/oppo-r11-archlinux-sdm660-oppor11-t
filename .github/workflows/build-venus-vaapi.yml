@@ -1,0 +1,140 @@
+name: Build R11T Venus VA-API driver
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'archlinux/venus-vaapi-r11t/**'
+      - '.github/workflows/build-venus-vaapi.yml'
+  pull_request:
+    paths:
+      - 'archlinux/venus-vaapi-r11t/**'
+      - '.github/workflows/build-venus-vaapi.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: venus-vaapi-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-aarch64:
+    name: Build aarch64 Venus VA-API package
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+
+    env:
+      BUILD_IMAGE: menci/archlinuxarm:base-devel-20261015.38692846456
+      DRIVER_COMMIT: 37e1030aba11f66e303e4f5fb0c3a13e2a78265e
+
+    steps:
+      - name: Checkout deployment repository
+        uses: actions/checkout@v4
+
+      - name: Validate delivery layout
+        run: |
+          set -euo pipefail
+          package_dir="$GITHUB_WORKSPACE/archlinux/venus-vaapi-r11t"
+          test -f "$package_dir/PKGBUILD"
+          test -f "$package_dir/README.md"
+          bash -n "$package_dir/PKGBUILD"
+          grep -F "$DRIVER_COMMIT" "$package_dir/PKGBUILD"
+
+      - name: Build package in Arch Linux ARM
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/venus-vaapi-package"
+          docker run --rm --privileged \
+            --platform linux/arm64 \
+            --volume "$GITHUB_WORKSPACE:/workspace" \
+            --workdir /workspace \
+            "$BUILD_IMAGE" \
+            bash -euxo pipefail -c '
+              pacman -Sy --noconfirm
+
+              package_dir=/workspace/archlinux/venus-vaapi-r11t
+              output_dir=/workspace/venus-vaapi-package
+              build_dir=/build/venus-vaapi
+
+              rm -rf "$build_dir"
+              install -d -m 0755 "$build_dir" "$output_dir"
+              cp -a "$package_dir/." "$build_dir/"
+
+              if ! id builder >/dev/null 2>&1; then
+                useradd --create-home --shell /bin/bash builder
+              fi
+              printf "%s\n" "builder ALL=(ALL) NOPASSWD: ALL" \
+                > /etc/sudoers.d/makepkg-builder
+              chmod 0440 /etc/sudoers.d/makepkg-builder
+              chown -R builder:builder "$build_dir"
+              chown builder:builder "$output_dir"
+
+              printf "PKGDEST=%s\nPKGEXT=.pkg.tar.zst\n" "$output_dir" \
+                >> /etc/makepkg.conf
+
+              runuser -u builder -- env HOME=/home/builder \
+                bash -euxo pipefail -c "
+                  cd \"$build_dir\"
+                  makepkg --syncdeps --noconfirm --cleanbuild --log
+                "
+
+              package="$(find "$output_dir" -maxdepth 1 -type f \
+                -name "*.pkg.tar.zst" -print -quit)"
+              test -n "$package"
+              pacman -Qip "$package"
+              pacman -Qlp "$package" | grep -F /usr/lib/dri/venus_drv_video.so
+
+              rm -rf /tmp/venus-check
+              mkdir -p /tmp/venus-check
+              zstd -dc "$package" | bsdtar -xf - -C /tmp/venus-check \
+                usr/lib/dri/venus_drv_video.so
+              file /tmp/venus-check/usr/lib/dri/venus_drv_video.so
+              nm -D --defined-only /tmp/venus-check/usr/lib/dri/venus_drv_video.so \
+                | grep -F __vaDriverInit_1_0
+
+              chmod 0644 "$output_dir"/*.pkg.tar.zst
+              chmod 0777 "$output_dir"
+            '
+
+      - name: Checksum and document package
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE/venus-vaapi-package"
+          sha256sum -- *.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+          cat > INSTALL.md <<'EOF'
+          # Install and validate the R11T Venus VA-API driver
+
+          This package is experimental until the target device passes both the
+          capability probe and a real decode test.
+
+          1. Install the package:
+
+             sudo pacman -U venus-vaapi-r11t-*.pkg.tar.zst
+
+          2. Probe the driver explicitly:
+
+             LIBVA_DRIVER_NAME=venus vainfo --display drm --device /dev/dri/renderD128
+
+          3. Decode a known H.264 file through VA-API:
+
+             LIBVA_DRIVER_NAME=venus ffmpeg -hwaccel vaapi \
+               -vaapi_device /dev/dri/renderD128 \
+               -i test-h264.mp4 -f null -
+
+          4. Only enable it for applications after the decode test passes.
+          EOF
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-vaapi-r11t-aarch64
+          if-no-files-found: error
+          retention-days: 30
+          path: |
+            venus-vaapi-package/*.pkg.tar.zst
+            venus-vaapi-package/SHA256SUMS
+            venus-vaapi-package/INSTALL.md
