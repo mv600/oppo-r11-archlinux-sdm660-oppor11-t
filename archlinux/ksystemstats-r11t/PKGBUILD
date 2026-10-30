@@ -6,7 +6,7 @@
 pkgname=ksystemstats
 pkgver=6.8.2
 _dirver=$(echo $pkgver | cut -d. -f1-3)
-pkgrel=1.2
+pkgrel=1.3
 pkgdesc='A plugin based system monitoring daemon'
 arch=(aarch64)
 url='https://kde.org/plasma-desktop/'

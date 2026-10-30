@@ -25,9 +25,10 @@ void LinuxAdrenoGpu::makeSensors()
     // sensors that this platform GPU cannot provide.
     GpuDevice::makeSensors();
 
-    m_usageProperty = new KSysGuard::SysFsSensor(QStringLiteral("usage"),
-                                                 m_devfreqPath % QStringLiteral("/gpu_busy_percent"), 0, this);
-    m_usageSensor = m_usageProperty;
+    auto usage = new KSysGuard::SysFsSensor(QStringLiteral("usage"),
+                                             m_devfreqPath % QStringLiteral("/gpu_busy_percent"), 0, this);
+    m_usageProperty = usage;
+    m_usageSensor = usage;
 
     auto frequency = new KSysGuard::SysFsSensor(QStringLiteral("coreFrequency"),
                                                  m_devfreqPath % QStringLiteral("/cur_freq"), 0, this);
