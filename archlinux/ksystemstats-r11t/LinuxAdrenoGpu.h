@@ -7,11 +7,6 @@
 
 #include "GpuDevice.h"
 
-namespace KSysGuard
-{
-class SysFsSensor;
-}
-
 class LinuxAdrenoGpu : public GpuDevice
 {
     Q_OBJECT
@@ -27,6 +22,4 @@ protected:
 
 private:
     QString m_devfreqPath;
-    KSysGuard::SysFsSensor *m_usageSensor = nullptr;
-    KSysGuard::SysFsSensor *m_coreFrequencySensor = nullptr;
 };

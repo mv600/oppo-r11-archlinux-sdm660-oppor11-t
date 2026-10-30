@@ -5,7 +5,7 @@
 
 #include "LinuxAdrenoGpu.h"
 
-#include <systemstats/SysFsSensor.h>
+#include <QFile>
 
 LinuxAdrenoGpu::LinuxAdrenoGpu(const QString &id, const QString &name, const QString &devfreqPath)
     : GpuDevice(id, name)
@@ -15,8 +15,15 @@ LinuxAdrenoGpu::LinuxAdrenoGpu(const QString &id, const QString &name, const QSt
 
 void LinuxAdrenoGpu::update()
 {
-    m_usageSensor->update();
-    m_coreFrequencySensor->update();
+    QFile busyPercent(m_devfreqPath % QStringLiteral("/gpu_busy_percent"));
+    if (busyPercent.open(QIODevice::ReadOnly)) {
+        m_usageProperty->setValue(busyPercent.readAll().trimmed().toInt());
+    }
+
+    QFile currentFrequency(m_devfreqPath % QStringLiteral("/cur_freq"));
+    if (currentFrequency.open(QIODevice::ReadOnly)) {
+        m_coreFrequencyProperty->setValue(currentFrequency.readAll().trimmed().toLongLong() / 1000);
+    }
 }
 
 void LinuxAdrenoGpu::makeSensors()
@@ -24,19 +31,6 @@ void LinuxAdrenoGpu::makeSensors()
     // GpuDevice::initialize() expects the complete property set, including the
     // sensors that this platform GPU cannot provide.
     GpuDevice::makeSensors();
-
-    auto usage = new KSysGuard::SysFsSensor(QStringLiteral("usage"),
-                                             m_devfreqPath % QStringLiteral("/gpu_busy_percent"), 0, this);
-    m_usageProperty = usage;
-    m_usageSensor = usage;
-
-    auto frequency = new KSysGuard::SysFsSensor(QStringLiteral("coreFrequency"),
-                                                 m_devfreqPath % QStringLiteral("/cur_freq"), 0, this);
-    frequency->setConvertFunction([](const QByteArray &input) {
-        return std::atoll(input) / 1000;
-    });
-    m_coreFrequencyProperty = frequency;
-    m_coreFrequencySensor = frequency;
 }
 
 #include "moc_LinuxAdrenoGpu.cpp"
