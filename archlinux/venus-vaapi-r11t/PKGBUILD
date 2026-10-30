@@ -5,7 +5,7 @@
 
 pkgname=venus-vaapi-r11t
 pkgver=0.12.0.r14.g37e1030
-pkgrel=3
+pkgrel=4
 pkgdesc='VA-API backend for the Qualcomm Venus V4L2 decoder'
 arch=(aarch64)
 url='https://github.com/snowf14k3/venus-vaapi-driver'
@@ -19,10 +19,14 @@ makedepends=(git
              ninja)
 provides=(venus-vaapi-driver)
 conflicts=(venus-vaapi-driver)
-source=('venus-vaapi-driver::git+https://github.com/snowf14k3/venus-vaapi-driver.git#commit=37e1030aba11f66e303e4f5fb0c3a13e2a78265e')
-sha256sums=('SKIP')
+source=('venus-vaapi-driver::git+https://github.com/snowf14k3/venus-vaapi-driver.git#commit=37e1030aba11f66e303e4f5fb0c3a13e2a78265e'
+        '0001-h264-request-decode-order-output.patch')
+sha256sums=('SKIP'
+            '8119fbeb12f2f2f368b4696868c8725289d8e4b6ebdf27ef2ad16933e66e5d42')
 
 prepare() {
+  patch -d venus-vaapi-driver -p1 -i "$srcdir/0001-h264-request-decode-order-output.patch"
+
   # The upstream build uses -Werror. GCC 15 diagnoses a possible truncation
   # in an encoder diagnostic string which is unrelated to the decoder path.
   sed -i 's/char operation\[64\];/char operation[128];/' \

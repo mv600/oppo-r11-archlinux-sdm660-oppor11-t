@@ -1,0 +1,34 @@
+From: R11T Arch Linux port <lmv600vm@gmail.com>
+Subject: [PATCH] h264: request decode-order output
+
+Firefox creates and submits only three VA surfaces before its first
+vaSyncSurface call.  With display delay enabled, the firmware can hold the
+initial IDR until reorder depth is satisfied, leaving the sync with no output
+and eventually failing with VA_STATUS_ERROR_HW_BUSY.  FFmpeg hides this because
+it submits a larger initial batch.
+
+Request the same decode-order output that the HEVC path already uses.  The
+control maps to HFI_OUTPUT_ORDER_DECODE, so the first decoded frame becomes
+available after the initial input batch instead of waiting for display-order
+reordering.
+---
+ src/v4l2_decoder.c | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/v4l2_decoder.c b/src/v4l2_decoder.c
+index 56cf60a..66ddfd5 100644
+--- a/src/v4l2_decoder.c
++++ b/src/v4l2_decoder.c
+@@ -392,7 +392,8 @@ int venus_v4l2_decoder_open(
+     if (status < 0)
+         goto fail;
+ 
+-    if (decoder->coded_format == V4L2_PIX_FMT_HEVC) {
++    if (decoder->coded_format == V4L2_PIX_FMT_HEVC ||
++        decoder->coded_format == V4L2_PIX_FMT_H264) {
+         struct v4l2_control delay = {
+             .id = V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY,
+             .value = 0,
+
+--
+2.51.0
