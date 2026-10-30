@@ -26,6 +26,7 @@ protected:
     void makeSensors() override;
 
 private:
+    QString m_devfreqPath;
     KSysGuard::SysFsSensor *m_usageSensor = nullptr;
     KSysGuard::SysFsSensor *m_coreFrequencySensor = nullptr;
 };
